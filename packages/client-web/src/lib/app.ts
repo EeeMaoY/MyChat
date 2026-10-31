@@ -183,4 +183,40 @@ export function getMessaging(): Messaging | null {
   return messaging;
 }
 
+// ---------- 数据导出与托管（FR-7.2/7.3，UI 接入用） ----------
+
+export async function exportAllData(): Promise<string> {
+  if (!messaging) throw new Error("应用尚未就绪");
+  return messaging.exportAll();
+}
+
+/** 导入恢复：成功后返回 true（内部已重建会话与实时通道）。 */
+export async function importAllData(json: string): Promise<boolean> {
+  if (!messaging) return false;
+  await messaging.importAll(json);
+  setState({ phase: "main", did: messaging.identity.did });
+  syncFromMessaging();
+  return true;
+}
+
+export async function createCustodyBackup(): Promise<{ hosts: string[] }> {
+  if (!messaging) throw new Error("应用尚未就绪");
+  return messaging.createCustodyBackup();
+}
+
+export async function listCustodyCopies(): Promise<
+  { fromDid: string; cid: string; contentKey: string; nonce: string }[]
+> {
+  return (await messaging?.listCustodyCopies()) ?? [];
+}
+
+export async function decryptCustodyCopy(copy: {
+  cid: string;
+  contentKey: string;
+  nonce: string;
+}): Promise<string> {
+  if (!messaging) throw new Error("应用尚未就绪");
+  return messaging.decryptCustodyCopy(copy);
+}
+
 export type { ChatMessage, Contact };

@@ -97,7 +97,27 @@ export interface ChatMessage {
 type SessionPayload =
   | { v: 1; type: "chat"; text: string }
   | { v: 1; type: "receipt"; delivered: string[]; read: string[] }
-  | ({ v: 1; type: "image" | "file" } & AttachmentMeta);
+  | ({ v: 1; type: "image" | "file" } & AttachmentMeta)
+  /** 好友托管：请求回传副本 / 回传副本（清单块 CID + 清单密钥，均为密文材料，FR-7.3） */
+  | { v: 1; type: "custody-request"; forName: string | null }
+  | { v: 1; type: "custody-reply"; cid: string; contentKey: string; nonce: string };
+
+/** 开放备份包格式（FR-7.2；明文 JSON，导出文件的保管责任在用户，UX-7 披露） */
+interface ExportBundle {
+  format: "mychat-backup";
+  version: 1;
+  createdAt: string;
+  identity: string;
+  myName: string | null;
+  spk: StoredKeyPair;
+  opk: { id: number } & StoredKeyPair;
+  msgSeq: number;
+  contacts: Contact[];
+  sessions: { did: string; session: string }[];
+  messages: { did: string; items: ChatMessage[] }[];
+  cursors: Record<string, number>;
+  readReceipts: "on" | "off";
+}
 
 export interface MessagingDeps {
   api: NodeApi;
@@ -293,6 +313,141 @@ export class Messaging {
     }
   }
 
+  // ----- 数据导出与好友托管（FR-7.2 / FR-7.3 M1，M1 计划 §3.4） -----
+
+  /**
+   * 一键导出全部数据的开放格式包（身份/联系人/会话/消息/游标/设置）。
+   * 明文 JSON——导出文件本身等同设备数据，调用方应提示用户妥善保管（UX-7）。
+   */
+  async exportAll(): Promise<string> {
+    const sessions: { did: string; session: string }[] = [];
+    for (const [did, session] of this.sessions) sessions.push({ did, session: serializeSession(session) });
+    const messages: { did: string; items: ChatMessage[] }[] = [];
+    for (const [did, items] of this.messages) messages.push({ did, items });
+    const cursors: Record<string, number> = Object.fromEntries(this.cursors);
+    return JSON.stringify({
+      format: "mychat-backup",
+      version: 1,
+      createdAt: new Date().toISOString(),
+      identity: serializeIdentity(this.identity),
+      myName: this.myName,
+      spk: kpToJson(this.spk),
+      opk: { id: this.opk.id, ...kpToJson(this.opk) },
+      msgSeq: this.msgSeq,
+      contacts: [...this.contacts.values()],
+      sessions,
+      messages,
+      cursors,
+      readReceipts: (await this.readReceiptsEnabled()) ? "on" : "off",
+    } satisfies ExportBundle);
+  }
+
+  /** 导入恢复：清空本机数据后整包写入并重建内存态（新环境/数据丢失场景）。 */
+  async importAll(json: string): Promise<void> {
+    let bundle: ExportBundle;
+    try {
+      bundle = JSON.parse(json) as ExportBundle;
+    } catch {
+      throw new Error("备份文件不是合法 JSON");
+    }
+    if (bundle?.format !== "mychat-backup" || bundle.version !== 1) {
+      throw new Error("备份包格式不识别（format/version 不匹配）");
+    }
+    // 完整性：身份可经反序列化全字节校验（防篡改序列化的同一保证）
+    const identity = deserializeIdentity(bundle.identity);
+
+    this.stopRealtime();
+    await this.deps.kv.clear();
+    await this.deps.kv.put(K_IDENTITY, utf8ToBytes(bundle.identity));
+    await this.deps.kv.put(K_SPK, utf8ToBytes(JSON.stringify(bundle.spk)));
+    await this.deps.kv.put(K_OPK, utf8ToBytes(JSON.stringify(bundle.opk)));
+    this.msgSeq = bundle.msgSeq;
+    await this.deps.kv.put(K_MSG_SEQ, utf8ToBytes(String(bundle.msgSeq)));
+    if (bundle.myName !== null) await this.deps.kv.put(K_MY_NAME, utf8ToBytes(bundle.myName));
+    await this.deps.kv.put(SETTING_READ_RECEIPTS, utf8ToBytes(bundle.readReceipts));
+
+    // 内存态重建
+    this.identity = identity;
+    this.spk = kpFromJson(bundle.spk);
+    this.opk = { id: bundle.opk.id, ...kpFromJson(bundle.opk) };
+    this.myName = bundle.myName;
+    this.contacts = new Map(bundle.contacts.map((c) => [c.did, c]));
+    this.sessions = new Map();
+    this.messages = new Map();
+    this.cursors = new Map(Object.entries(bundle.cursors).map(([k, v]) => [k, v]));
+    this.messageKeys = new Map();
+    this.readConfirmed = new Set();
+    for (const c of bundle.contacts) await this.deps.kv.put(contactKey(c.did), utf8ToBytes(JSON.stringify(c)));
+    for (const s of bundle.sessions) {
+      const session = deserializeSession(s.session);
+      this.sessions.set(s.did, session);
+      await this.deps.kv.put(sessionKey(s.did), utf8ToBytes(s.session));
+    }
+    for (const m of bundle.messages) {
+      for (const item of m.items) await this.persistMessage(m.did, item);
+    }
+    this.startRealtime();
+    void this.poll();
+    this.emit();
+  }
+
+  /**
+   * 好友托管备份（FR-7.3 M1 最小形态）：整包加密 → CAS 块 → 清单指针
+   * （CID + 清单密钥）经 E2EE 会话发给前 2 位联系人。好友不可读、互不知晓对方也是托管者。
+   */
+  async createCustodyBackup(): Promise<{ hosts: string[] }> {
+    const hostDid = [...this.contacts.keys()].slice(0, 2);
+    if (hostDid.length === 0) throw new Error("暂无联系人，无法设置托管");
+    const bundleJson = await this.exportAll();
+    const att = encryptAttachment(utf8ToBytes(bundleJson));
+    await this.deps.api.putBlock(att.cid, att.ciphertext);
+    for (const did of hostDid) {
+      const session = this.sessions.get(did);
+      if (!session) continue;
+      const wire = sessionSend(
+        session,
+        utf8ToBytes(
+          JSON.stringify({
+            v: 1,
+            type: "custody-reply",
+            cid: att.cid,
+            contentKey: base58Encode(att.contentKey),
+            nonce: base58Encode(att.nonce),
+          } satisfies SessionPayload),
+        ),
+      );
+      const mailboxId = sessionMailbox(session, "send", Date.now());
+      await this.deps.api.mailboxAppend(mailboxId, this.seal(wire, mailboxId));
+    }
+    this.emit();
+    return { hosts: hostDid };
+  }
+
+  /** 我持有的他人托管副本（恢复流 S7：凭身份恢复后向持有者请求回传）。 */
+  async listCustodyCopies(): Promise<{ fromDid: string; cid: string; contentKey: string; nonce: string }[]> {
+    const out: { fromDid: string; cid: string; contentKey: string; nonce: string }[] = [];
+    for (const key of await this.deps.kv.keys("custody:")) {
+      const raw = await this.deps.kv.get(key);
+      if (!raw) continue;
+      const payload = JSON.parse(bytesToUtf8(raw)) as { cid: string; contentKey: string; nonce: string };
+      out.push({ fromDid: key.slice("custody:".length), ...payload });
+    }
+    return out;
+  }
+
+  /** 解密一份托管副本为备份 JSON（恢复流：先社交恢复身份，再解密清单导入）。 */
+  async decryptCustodyCopy(copy: { cid: string; contentKey: string; nonce: string }): Promise<string> {
+    const ciphertext = await this.deps.api.getBlock(copy.cid);
+    if (!ciphertext) throw new Error("托管副本块不存在（节点无此数据）");
+    return bytesToUtf8(
+      decryptAttachment({
+        ciphertext,
+        contentKey: base58Decode(copy.contentKey),
+        nonce: base58Decode(copy.nonce),
+      }),
+    );
+  }
+
   // ----- 发送（FR-5.1 / FR-5.2 / FR-5.3 子集） -----
 
   async sendMessage(did: string, text: string): Promise<void> {
@@ -468,11 +623,39 @@ export class Messaging {
       await this.applyReceipt(did, payload);
       return null;
     }
+    if (payload.type === "custody-request") {
+      // 恢复流（S7）：对方以已验证身份请求回传其托管副本；仅当所存副本归属与请求方一致时回传
+      await this.replyCustopyIfHeld(did);
+      return null;
+    }
+    if (payload.type === "custody-reply") {
+      // 静默存储：好友的托管材料（密文清单指针），不出现在聊天记录
+      await this.deps.kv.put(
+        `custody:${did}`,
+        utf8ToBytes(JSON.stringify({ cid: payload.cid, contentKey: payload.contentKey, nonce: payload.nonce })),
+      );
+      return null;
+    }
     if (payload.type === "chat") {
       return await this.appendLocalMessage(did, "in", payload.text, "chat");
     }
     // image / file
     return await this.appendLocalMessage(did, "in", payload.name, payload.type, payload);
+  }
+
+  /** 收到 custody-request：若我持有该 DID 的托管副本则回传（did 不可伪造，会话建立即身份证明）。 */
+  private async replyCustopyIfHeld(requesterDid: string): Promise<void> {
+    const raw = await this.deps.kv.get(`custody:${requesterDid}`);
+    if (!raw) return;
+    const session = this.sessions.get(requesterDid);
+    if (!session) return;
+    const held = JSON.parse(bytesToUtf8(raw)) as { cid: string; contentKey: string; nonce: string };
+    const wire = sessionSend(
+      session,
+      utf8ToBytes(JSON.stringify({ v: 1, type: "custody-reply", ...held } satisfies SessionPayload)),
+    );
+    const mailboxId = sessionMailbox(session, "send", Date.now());
+    await this.deps.api.mailboxAppend(mailboxId, this.seal(wire, mailboxId));
   }
 
   /** 收到对端回执：升级本地 out 消息状态（read > delivered > sent）。 */
