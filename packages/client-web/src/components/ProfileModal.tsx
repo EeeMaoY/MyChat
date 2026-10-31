@@ -222,7 +222,7 @@ export default function ProfileModal({ onClose }: Props) {
     }
     setGuardiansPending(true);
     setGuardiansError(null);
-    const res = await setupGuardians(dids, GUARDIAN_THRESHOLD);
+    const res = await setupGuardians(dids, Math.min(GUARDIAN_THRESHOLD, dids.length));
     setGuardiansPending(false);
     if (!res.ok) {
       setGuardiansError(res.error ?? "设置失败");

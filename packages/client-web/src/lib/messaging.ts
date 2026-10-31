@@ -51,7 +51,7 @@ import {
   EPOCH_MS,
 } from "@mychat/core";
 
-import { fromHex, toHex } from "./base64";
+import { fromHex, toBase64, toHex } from "./base64";
 import { discoveryInboxId } from "./discovery";
 import type { NodeApi } from "./node-api";
 
@@ -541,7 +541,7 @@ export class Messaging {
       wrapCid: setup.announcement.wrapCid,
       threshold: setup.announcement.threshold,
       guardians: setup.announcement.guardians,
-      signature: base58Encode(setup.announcement.signature),
+      signature: toBase64(setup.announcement.signature),
     });
 
     for (const did of guardianDids) {
