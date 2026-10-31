@@ -1,6 +1,7 @@
 /**
  * 根组件：phase 路由 + 全局提示条 + 首启创建编排。
- * 流转（§10.3，UX-1）：loading → welcome → creating（≥1.2s 动画）→ set-name → main。
+ * 流转（§10.3，UX-1）：loading → welcome → creating（≥1.2s 动画）→ set-name → main；
+ * welcome 阶段可进入紧急联系人恢复向导（本地状态控制，不新增 phase）。
  */
 import { useEffect, useRef, useState, type ReactNode } from "react";
 
@@ -8,6 +9,7 @@ import { bootstrap, createMyIdentity, setNotice, useAppState } from "./lib/app";
 
 import CreatingPage from "./pages/CreatingPage";
 import MainPage from "./pages/MainPage";
+import RecoveryWizard from "./pages/RecoveryWizard";
 import SetNamePage from "./pages/SetNamePage";
 import WelcomePage from "./pages/WelcomePage";
 
@@ -22,6 +24,33 @@ export default function App() {
   const [animDone, setAnimDone] = useState(false);
   const bootstrapStartedRef = useRef(false);
   const createStartedRef = useRef(false);
+
+  // —— 紧急联系人恢复向导（无身份状态下的独立流程，不走 phase）——
+  const [recoveryOpen, setRecoveryOpen] = useState(false);
+  /** 已进入恢复模式（recoveryStart 成功，lib 把临时身份切到了 main）：取消时需重载回欢迎页。 */
+  const recoveryActivatedRef = useRef(false);
+
+  const openRecovery = (): void => setRecoveryOpen(true);
+
+  function handleRecoveryActivated(): void {
+    recoveryActivatedRef.current = true;
+  }
+
+  function handleRecoveryFinished(): void {
+    recoveryActivatedRef.current = false;
+    setRecoveryOpen(false);
+    setNotice("身份已恢复。建议立即在「我的」中点击「立即创建托管备份」");
+  }
+
+  function handleRecoveryCancel(): void {
+    if (recoveryActivatedRef.current) {
+      // 恢复模式下 lib 已把临时身份切进 main 且无回退 API，重载即可回到无身份的欢迎页
+      recoveryActivatedRef.current = false;
+      location.reload();
+      return;
+    }
+    setRecoveryOpen(false);
+  }
 
   // 启动：加载已有身份或进入欢迎页（StrictMode 下防重复执行）
   useEffect(() => {
@@ -73,8 +102,12 @@ export default function App() {
     );
   } else if (creating) {
     page = <CreatingPage />;
+  } else if (recoveryOpen) {
+    page = (
+      <RecoveryWizard onFinished={handleRecoveryFinished} onActivated={handleRecoveryActivated} onCancel={handleRecoveryCancel} />
+    );
   } else if (state.phase === "welcome") {
-    page = <WelcomePage onStart={startCreate} />;
+    page = <WelcomePage onStart={startCreate} onRecovery={openRecovery} />;
   } else if (state.phase === "set-name") {
     page = <SetNamePage />;
   } else {

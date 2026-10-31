@@ -1,7 +1,9 @@
-/** 产品首页：一句话定位 + 特性点 + 开始使用（UX-1：全程无密钥/节点操作）。 */
+/** 产品首页：一句话定位 + 特性点 + 开始使用 + 恢复入口（UX-1：全程无密钥/节点操作）。 */
 
 interface Props {
   onStart: () => void;
+  /** 打开紧急联系人恢复向导（丢失访问权限场景）。 */
+  onRecovery: () => void;
 }
 
 const FEATURES = [
@@ -10,7 +12,7 @@ const FEATURES = [
   { name: "数据所有权", desc: "身份与聊天记录都在你自己的设备上，不依赖任何平台账号" },
 ] as const;
 
-export default function WelcomePage({ onStart }: Props) {
+export default function WelcomePage({ onStart, onRecovery }: Props) {
   return (
     <main className="page page-center welcome">
       <h1 className="welcome-title">MyChat</h1>
@@ -28,6 +30,9 @@ export default function WelcomePage({ onStart }: Props) {
       </ul>
       <button className="btn-primary btn-lg" onClick={onStart}>
         开始使用
+      </button>
+      <button className="welcome-recovery" onClick={onRecovery}>
+        已丢失访问权限？用紧急联系人恢复
       </button>
       <p className="welcome-hint">无需注册手机号或邮箱，身份将自动在你的设备上创建</p>
     </main>

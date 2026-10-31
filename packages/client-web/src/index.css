@@ -259,6 +259,21 @@ textarea {
   margin: 4px 0 0;
 }
 
+/* 恢复入口：次要链接样式 */
+.welcome-recovery {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 4px;
+}
+
+.welcome-recovery:hover {
+  color: var(--text);
+}
+
 /* ---------- 身份创建动画页 ---------- */
 
 .creating-ring {
@@ -339,6 +354,71 @@ textarea {
   display: flex;
   height: 100vh;
   overflow: hidden;
+}
+
+/* 主界面根容器：容纳顶部恢复请求横幅（有横幅时主布局压缩剩余高度） */
+.main-root {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.main-root .main-layout {
+  flex: 1;
+  min-height: 0;
+  height: auto;
+}
+
+/* ---------- 守护者侧恢复请求横幅（醒目警示，UX-2 防社工） ---------- */
+
+.recovery-banner {
+  flex: none;
+  display: flex;
+  gap: 12px;
+  align-items: flex-start;
+  background: #35290f;
+  border-bottom: 1px solid #8a6d21;
+  padding: 12px 18px;
+}
+
+.recovery-banner-icon {
+  font-size: 1.15rem;
+  flex: none;
+  margin-top: 1px;
+}
+
+.recovery-banner-body {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.recovery-banner-row {
+  display: flex;
+  gap: 14px;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+}
+
+.recovery-banner-text {
+  margin: 0;
+  font-size: 0.88rem;
+  line-height: 1.6;
+  color: #f0e3bd;
+}
+
+.recovery-banner-text code {
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+}
+
+.recovery-banner-actions {
+  display: flex;
+  gap: 8px;
+  flex: none;
 }
 
 /* ---------- 侧栏（会话列表） ---------- */
@@ -964,6 +1044,230 @@ textarea {
 
 .node-form {
   margin-top: 4px;
+}
+
+/* ---------- "我"弹窗：数据安全与紧急联系人 ---------- */
+
+.data-row {
+  margin-top: 4px;
+  flex-wrap: wrap;
+}
+
+.hidden-file-input {
+  display: none;
+}
+
+.warn-hint {
+  color: var(--danger);
+}
+
+.custody-meta {
+  color: var(--text-dim);
+  font-size: 0.8rem;
+}
+
+.guardian-list {
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--bg);
+  max-height: 180px;
+  overflow-y: auto;
+  margin-top: 6px;
+  display: flex;
+  flex-direction: column;
+}
+
+.guardian-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  cursor: pointer;
+  font-size: 0.88rem;
+}
+
+.guardian-item:hover {
+  background: var(--bg-hover);
+}
+
+.guardian-item + .guardian-item {
+  border-top: 1px solid var(--border);
+}
+
+.guardian-item input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+  cursor: pointer;
+  flex: none;
+}
+
+.guardian-item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.guardian-item-did {
+  color: var(--text-dim);
+  font-size: 0.72rem;
+  font-family: var(--font-mono);
+  flex: none;
+}
+
+.guardian-status {
+  margin-top: 2px;
+}
+
+/* ---------- 紧急联系人恢复向导 ---------- */
+
+.wizard-card {
+  width: 100%;
+  max-width: 480px;
+  background: var(--bg-raised);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 26px 28px;
+  text-align: left;
+}
+
+.wizard-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.wizard-title {
+  margin: 0;
+  font-size: 1.3rem;
+}
+
+.wizard-cancel {
+  background: none;
+  border: none;
+  color: var(--text-dim);
+  text-decoration: underline;
+  cursor: pointer;
+  padding: 4px;
+  font-size: 0.85rem;
+  flex: none;
+}
+
+.wizard-cancel:hover {
+  color: var(--text);
+}
+
+.wizard-steps {
+  list-style: none;
+  display: flex;
+  gap: 6px;
+  padding: 0;
+  margin: 16px 0 18px;
+}
+
+.wizard-step {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 5px;
+  font-size: 0.72rem;
+  color: var(--text-dim);
+  text-align: center;
+}
+
+.wizard-step-dot {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 0.76rem;
+}
+
+.wizard-step.current {
+  color: var(--text);
+}
+
+.wizard-step.current .wizard-step-dot {
+  border-color: var(--primary);
+  color: var(--primary);
+}
+
+.wizard-step.done {
+  color: var(--ok);
+}
+
+.wizard-step.done .wizard-step-dot {
+  border-color: var(--ok);
+  color: var(--ok);
+}
+
+.wizard-desc {
+  margin: 0 0 10px;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  line-height: 1.7;
+}
+
+.wizard-primary {
+  margin-top: 16px;
+}
+
+.wizard-chip-list {
+  list-style: none;
+  padding: 0;
+  margin: 12px 0 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.wizard-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--bg);
+  padding: 3px 12px;
+  font-size: 0.82rem;
+}
+
+.recovery-progress {
+  height: 10px;
+  border-radius: 999px;
+  background: var(--bg);
+  border: 1px solid var(--border);
+  overflow: hidden;
+  margin-top: 12px;
+}
+
+.recovery-progress-fill {
+  height: 100%;
+  background: var(--primary);
+  transition: width 0.3s ease;
+}
+
+.wizard-success {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+  gap: 6px;
+}
+
+.wizard-success-title {
+  margin: 6px 0 0;
+  color: var(--ok);
+  font-size: 1.25rem;
+  font-weight: 700;
+}
+
+.wizard-success .btn-primary {
+  margin-top: 14px;
 }
 
 /* ---------- 全局提示条 ---------- */
