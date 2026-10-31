@@ -39,9 +39,10 @@ describe("社交恢复全流程（3-of-5）", () => {
     });
     const rk = recoverRk(collected, 32);
 
-    // 新设备从节点取 wrap 块（此处直接用内存 wrap），用重组 RK 解开身份
-    const restoredJson = openIdentityWrap(rk, setup.wrap);
-    const restored = deserializeIdentity(restoredJson);
+    // 新设备从节点取 wrap 块（此处直接用内存 wrap），用重组 RK 解开身份（v2：含用户名）
+    const restoredPayload = openIdentityWrap(rk, setup.wrap);
+    expect(restoredPayload.myName).toBe(null);
+    const restored = deserializeIdentity(restoredPayload.identityJson);
     expect(restored.did).toBe(owner.did);
     expect(restored.ikEd.privateKey).toEqual(owner.ikEd.privateKey);
     expect(restored.ikX.privateKey).toEqual(owner.ikX.privateKey);

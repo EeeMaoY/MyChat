@@ -86,22 +86,36 @@ export function verifyRecoveryAnnouncement(a: RecoveryAnnouncement): boolean {
 
 const WRAP_INFO = "mychat:recovery-wrap:v1";
 
-/** RK 加密身份 JSON（serializeIdentity 产物）。 */
-export function sealIdentityWrap(rk: Uint8Array, identityJson: string): Uint8Array {
+/**
+ * RK 加密恢复包裹 v2（M2-S9 KI-2）：身份 JSON + 用户名一起恢复。
+ * 明文结构：JSON `{ v:2, identity, myName }`。
+ */
+export interface RecoveryWrapPayload {
+  identityJson: string;
+  myName: string | null;
+}
+
+export function sealIdentityWrap(rk: Uint8Array, payload: RecoveryWrapPayload): Uint8Array {
   const key = hkdfSha256(rk, new Uint8Array(32), WRAP_INFO, AEAD_KEY_LENGTH);
   const nonce = randomBytes(AEAD_NONCE_LENGTH);
   const saltPart = randomBytes(16);
-  const ct = aeadEncrypt(key, nonce, utf8ToBytes(identityJson), saltPart);
+  const plaintext = utf8ToBytes(JSON.stringify({ v: 2, ...payload }));
+  const ct = aeadEncrypt(key, nonce, plaintext, saltPart);
   return new Uint8Array([...saltPart, ...nonce, ...ct]);
 }
 
-export function openIdentityWrap(rk: Uint8Array, wrap: Uint8Array): string {
+export function openIdentityWrap(rk: Uint8Array, wrap: Uint8Array): RecoveryWrapPayload {
   if (wrap.length < 16 + AEAD_NONCE_LENGTH + 16) throw new Error("身份包裹截断");
   const saltPart = wrap.slice(0, 16);
   const nonce = wrap.slice(16, 16 + AEAD_NONCE_LENGTH);
   const ct = wrap.slice(16 + AEAD_NONCE_LENGTH);
   const key = hkdfSha256(rk, new Uint8Array(32), WRAP_INFO, AEAD_KEY_LENGTH);
-  return bytesToUtf8(aeadDecrypt(key, nonce, ct, saltPart));
+  const raw = bytesToUtf8(aeadDecrypt(key, nonce, ct, saltPart));
+  const parsed = JSON.parse(raw) as { v?: number; identityJson?: string; myName?: string | null };
+  if (parsed.v !== 2 || typeof parsed.identityJson !== "string") {
+    throw new Error("身份包裹版本不识别（v1 包裹已不支持，请使用升级前版本导出）");
+  }
+  return { identityJson: parsed.identityJson, myName: parsed.myName ?? null };
 }
 
 // ---------- 守护者分片包 ----------
@@ -136,7 +150,7 @@ export function createRecoverySetup(
     guardianDid: guardianDids[i]!,
     share,
   }));
-  const wrap = sealIdentityWrap(rk, serializeIdentity(identity));
+  const wrap = sealIdentityWrap(rk, { identityJson: serializeIdentity(identity), myName: null });
   const wrapCid = base58Encode(blake3Hash(wrap));
   const announcement = makeRecoveryAnnouncement(identity, wrapCid, threshold, guardianDids);
   return { did: identity.did, wrapCid, rk, shares, wrap, announcement };
