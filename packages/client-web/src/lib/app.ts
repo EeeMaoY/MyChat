@@ -29,7 +29,7 @@ let kv: KVStore | null = null;
 let messaging: Messaging | null = null;
 let pendingName: string | null = null;
 
-const state: AppState = {
+let state: AppState = {
   phase: "loading",
   did: null,
   myName: null,
@@ -42,8 +42,12 @@ const state: AppState = {
 
 const listeners = new Set<() => void>();
 
+/**
+ * 不可变快照更新：useSyncExternalStore 以 Object.is 比较 getSnapshot 结果，
+ * 就地 mutate 同一引用会导致 React 判定无变化而不重渲染（集成期已踩坑）。
+ */
 function setState(patch: Partial<AppState>): void {
-  Object.assign(state, patch);
+  state = { ...state, ...patch };
   for (const listener of listeners) listener();
 }
 

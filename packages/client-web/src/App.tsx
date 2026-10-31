@@ -59,8 +59,10 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [notice]);
 
-  // 创建页退出条件：已请求创建，且（创建完成切到 set-name && 动画计时结束）
-  const creating = creatingRequested && !(state.phase === "set-name" && animDone);
+  // 创建页退出条件：动画计时结束，且流程已落到后续任一阶段
+  // （起名页；注册成功会直接跳过起名页进主界面，同样视为已退出）
+  const settled = animDone && (state.phase === "set-name" || state.phase === "main");
+  const creating = creatingRequested && !settled;
 
   let page: ReactNode;
   if (state.phase === "loading" && !creatingRequested) {
