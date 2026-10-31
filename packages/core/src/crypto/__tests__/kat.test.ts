@@ -5,15 +5,15 @@
 import { hex } from "@scure/base";
 import { describe, expect, it } from "vitest";
 
-import { blake3Hash } from "../hash";
-import { hkdfSha256 } from "../kdf";
+import { blake3Hash } from "../hash.ts";
+import { hkdfSha256 } from "../kdf.ts";
 import {
   ed25519PublicKeyFromPrivate,
   ed25519Sign,
   ed25519Verify,
   x25519PublicKeyFromPrivate,
   x25519SharedSecret,
-} from "../keys";
+} from "../keys.ts";
 
 describe("X25519（RFC 7748 §6.1）", () => {
   // RFC 7748 A.6 Diffie-Hellman 秘密交换向量

@@ -11,8 +11,8 @@ import {
   AEAD_TAG_LENGTH,
   aeadDecrypt,
   aeadEncrypt,
-} from "../aead";
-import { randomBytes } from "../random";
+} from "../aead.ts";
+import { randomBytes } from "../random.ts";
 
 describe("XChaCha20-Poly1305 封装", () => {
   it("加密-解密往返（含关联数据）", () => {

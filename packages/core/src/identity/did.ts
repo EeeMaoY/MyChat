@@ -4,8 +4,8 @@
  * 自认证 DID：标识符本体即 Ed25519 身份密钥（IK）公钥的 base58 编码，
  * 无需注册机构即可全局唯一且可验证归属（设计报告 §4.1）。
  */
-import { base58Decode, base58Encode } from "../codec";
-import { KEY_LENGTH } from "../crypto";
+import { base58Decode, base58Encode } from "../codec/index.ts";
+import { KEY_LENGTH } from "../crypto/index.ts";
 
 /** DID 方法前缀（设计报告 §4.1，M0 冻结为 mychat 方法） */
 export const DID_PREFIX = "did:mychat:";

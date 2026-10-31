@@ -5,13 +5,13 @@
  */
 import { describe, expect, it } from "vitest";
 
-import { utf8ToBytes } from "../../codec";
-import { generateX25519KeyPair } from "../../crypto";
+import { utf8ToBytes } from "../../codec/index.ts";
+import { generateX25519KeyPair } from "../../crypto/index.ts";
 import {
   createIdentity,
   deriveOpkId,
   issuePreKeyBundle,
-} from "../../identity";
+} from "../../identity/index.ts";
 import {
   acceptSession,
   deserializeSession,
@@ -20,7 +20,7 @@ import {
   sessionMailbox,
   sessionReceive,
   sessionSend,
-} from "../session";
+} from "../session.ts";
 
 /** 搭建一对已建立会话的双方（响应方持有 SPK/OPK 池的完整演练）。 */
 function setupConversation() {

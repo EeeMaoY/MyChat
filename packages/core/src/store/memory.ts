@@ -1,7 +1,7 @@
 /**
  * 内存 KV 实现：单元测试、dev-node 侧逻辑与不持久化场景使用。
  */
-import type { KVStore } from "./interface";
+import type { KVStore } from "./interface.ts";
 
 export function createMemoryKVStore(): KVStore {
   const map = new Map<string, Uint8Array>();

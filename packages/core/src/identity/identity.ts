@@ -7,7 +7,7 @@
  *
  * FR-1.1：身份全自动无感创建，无任何参数与用户交互。
  */
-import { bytesEqual, concatBytes, utf8ToBytes } from "../codec";
+import { bytesEqual, concatBytes, utf8ToBytes } from "../codec/index.ts";
 import {
   type KeyPair,
   KEY_LENGTH,
@@ -17,8 +17,8 @@ import {
   generateEd25519KeyPair,
   generateX25519KeyPair,
   x25519PublicKeyFromPrivate,
-} from "../crypto";
-import { didFromEd25519PublicKey } from "./did";
+} from "../crypto/index.ts";
+import { didFromEd25519PublicKey } from "./did.ts";
 
 /** IK-x 绑定签名的域分隔前缀（与 PreKeyBundle.ikxSignature 同构，§5.2） */
 export const IKX_BINDING_PREFIX = utf8ToBytes("mychat:ikx-bind:");

@@ -5,7 +5,7 @@
  * 注意（W3 约束披露）：浏览器可在存储压力下驱逐 IndexedDB 数据，
  * 好友托管加密副本（FR-7.3）在 M1 提供容灾。
  */
-import type { KVStore } from "./interface";
+import type { KVStore } from "./interface.ts";
 
 const DB_VERSION = 1;
 

@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { createMemoryKVStore } from "../memory";
+import { createMemoryKVStore } from "../memory.ts";
 
 describe("内存 KVStore（KV 语义契约）", () => {
   it("put/get/delete 往返", async () => {

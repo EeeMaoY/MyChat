@@ -15,10 +15,10 @@
  */
 export const PROTOCOL_VERSION = "0.1.0";
 
-export * from "./protocol/interfaces";
-export * from "./crypto";
-export * from "./codec";
-export * from "./identity";
-export * from "./signal";
-export * from "./envelope";
-export * from "./store";
+export * from "./protocol/interfaces.ts";
+export * from "./crypto/index.ts";
+export * from "./codec/index.ts";
+export * from "./identity/index.ts";
+export * from "./signal/index.ts";
+export * from "./envelope/index.ts";
+export * from "./store/index.ts";

@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 
-import { base58Decode, base58Encode } from "../base58";
-import { bytesEqual, bytesToUtf8, concatBytes, utf8ToBytes } from "../bytes";
+import { base58Decode, base58Encode } from "../base58.ts";
+import { bytesEqual, bytesToUtf8, concatBytes, utf8ToBytes } from "../bytes.ts";
 
 describe("base58", () => {
   it("编解码往返（空、边界值、随机长度）", () => {

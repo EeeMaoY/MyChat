@@ -6,7 +6,7 @@
  */
 import { ed25519, x25519 } from "@noble/curves/ed25519";
 
-import { randomBytes } from "./random";
+import { randomBytes } from "./random.ts";
 
 export const KEY_LENGTH = 32;
 

@@ -10,29 +10,29 @@ import {
   encodePreKeyBundle,
   issuePreKeyBundle,
   verifyPreKeyBundle,
-} from "../bundle";
+} from "../bundle.ts";
 import {
   didFromEd25519PublicKey,
   didToEd25519PublicKey,
   isValidDid,
-} from "../did";
+} from "../did.ts";
 import {
   createIdentity,
   deserializeIdentity,
   ikxBindingMessage,
   serializeIdentity,
-} from "../identity";
+} from "../identity.ts";
 import {
   makeUserNameRecord,
   signUserNameRecord,
   verifyUserNameRecord,
-} from "../username";
+} from "../username.ts";
 import {
   ed25519Verify,
   generateEd25519KeyPair,
   generateX25519KeyPair,
-} from "../../crypto";
-import { base58Encode, bytesEqual } from "../../codec";
+} from "../../crypto/index.ts";
+import { base58Encode, bytesEqual } from "../../codec/index.ts";
 
 /** 翻转首字节（篡改辅助） */
 function flipFirstByte(bytes: Uint8Array): Uint8Array {

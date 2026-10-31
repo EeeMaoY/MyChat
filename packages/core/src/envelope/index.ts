@@ -12,8 +12,8 @@ export {
   applyPadding,
   padClassForLength,
   stripPadding,
-} from "./padding";
-export { deriveSessionMailbox } from "./pseudonym";
+} from "./padding.ts";
+export { deriveSessionMailbox } from "./pseudonym.ts";
 export {
   DEFAULT_TIME_BUCKET_MS,
   ENVELOPE_VERSION,
@@ -21,4 +21,4 @@ export {
   encodeEnvelope,
   makeEnvelope,
   timestampBucket,
-} from "./envelope";
+} from "./envelope.ts";

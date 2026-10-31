@@ -10,8 +10,8 @@
  *
  * 纯函数库：无日志、无 I/O。
  */
-import { base58Encode } from "../codec";
-import { hkdfSha256 } from "../crypto";
+import { base58Encode } from "../codec/index.ts";
+import { hkdfSha256 } from "../crypto/index.ts";
 
 /** 伪地址输出字节数（18B → base58 文本约 25 字符） */
 const MAILBOX_BYTES = 18;

@@ -12,9 +12,9 @@
  *
  * 纯函数库：无日志、无 I/O。
  */
-import { bytesToUtf8, utf8ToBytes } from "../codec";
-import { AEAD_NONCE_LENGTH, randomBytes } from "../crypto";
-import type { Envelope } from "../protocol/interfaces";
+import { bytesToUtf8, utf8ToBytes } from "../codec/index.ts";
+import { AEAD_NONCE_LENGTH, randomBytes } from "../crypto/index.ts";
+import type { Envelope } from "../protocol/interfaces.ts";
 
 /** 信封二进制格式版本（NFR-10 版本化；对应线格式 1B version 字段） */
 export const ENVELOPE_VERSION = 1;

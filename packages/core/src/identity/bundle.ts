@@ -4,10 +4,10 @@
  * bundle 经 EDS 公开区分发（存放与分发由 S2 节点负责，本模块只管构造/验证/编解码）。
  * 发起方在 X3DH 握手前必须验签：IK-ed 签名同时覆盖 IK-x（身份 DH 绑定）与 SPK（签名预密钥）。
  */
-import { concatBytes, utf8ToBytes } from "../codec";
-import { type KeyPair, KEY_LENGTH, blake3Hash, ed25519Sign, ed25519Verify } from "../crypto";
-import { didToEd25519PublicKey } from "./did";
-import { type Identity, ikxBindingMessage } from "./identity";
+import { concatBytes, utf8ToBytes } from "../codec/index.ts";
+import { type KeyPair, KEY_LENGTH, blake3Hash, ed25519Sign, ed25519Verify } from "../crypto/index.ts";
+import { didToEd25519PublicKey } from "./did.ts";
+import { type Identity, ikxBindingMessage } from "./identity.ts";
 
 /** SPK 绑定签名的域分隔前缀（§5.2） */
 export const SPK_BINDING_PREFIX = "mychat:spk:";

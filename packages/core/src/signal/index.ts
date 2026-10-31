@@ -11,7 +11,7 @@ export {
   ratchetEncrypt,
   ratchetInitInitiator,
   ratchetInitResponder,
-} from "./ratchet";
+} from "./ratchet.ts";
 export {
   EPOCH_MS,
   type Session,
@@ -23,7 +23,7 @@ export {
   sessionMailbox,
   sessionReceive,
   sessionSend,
-} from "./session";
+} from "./session.ts";
 export {
   KIND_INITIAL,
   KIND_REGULAR,
@@ -32,11 +32,11 @@ export {
   type SessionWire,
   decodeSessionWire,
   encodeSessionWire,
-} from "./wire";
+} from "./wire.ts";
 export {
   type X3dhInitialHeader,
   type X3dhInitiateResult,
   x3dhAccept,
   x3dhAssociatedData,
   x3dhInitiate,
-} from "./x3dh";
+} from "./x3dh.ts";

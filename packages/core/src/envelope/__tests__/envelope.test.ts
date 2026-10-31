@@ -4,7 +4,7 @@
  */
 import { describe, expect, it } from "vitest";
 
-import * as envelopeApi from "../index";
+import * as envelopeApi from "../index.ts";
 import {
   DEFAULT_TIME_BUCKET_MS,
   ENVELOPE_VERSION,
@@ -12,11 +12,11 @@ import {
   encodeEnvelope,
   makeEnvelope,
   timestampBucket,
-} from "../envelope";
-import { PAD_SIZES, applyPadding, padClassForLength, stripPadding } from "../padding";
-import { deriveSessionMailbox } from "../pseudonym";
-import { base58Decode, concatBytes, utf8ToBytes } from "../../codec";
-import type { Envelope } from "../../protocol/interfaces";
+} from "../envelope.ts";
+import { PAD_SIZES, applyPadding, padClassForLength, stripPadding } from "../padding.ts";
+import { deriveSessionMailbox } from "../pseudonym.ts";
+import { base58Decode, concatBytes, utf8ToBytes } from "../../codec/index.ts";
+import type { Envelope } from "../../protocol/interfaces.ts";
 
 const PAD_CLASSES = [0, 1, 2, 3] as const;
 

@@ -6,7 +6,7 @@ export {
   didFromEd25519PublicKey,
   didToEd25519PublicKey,
   isValidDid,
-} from "./did";
+} from "./did.ts";
 export {
   IKX_BINDING_PREFIX,
   type Identity,
@@ -14,7 +14,7 @@ export {
   deserializeIdentity,
   ikxBindingMessage,
   serializeIdentity,
-} from "./identity";
+} from "./identity.ts";
 export {
   SPK_BINDING_PREFIX,
   type PreKeyBundle,
@@ -23,10 +23,10 @@ export {
   encodePreKeyBundle,
   issuePreKeyBundle,
   verifyPreKeyBundle,
-} from "./bundle";
+} from "./bundle.ts";
 export {
   makeUserNameRecord,
   signUserNameRecord,
   userNameRecordMessage,
   verifyUserNameRecord,
-} from "./username";
+} from "./username.ts";

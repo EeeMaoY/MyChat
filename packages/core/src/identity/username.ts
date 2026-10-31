@@ -5,10 +5,10 @@
  * 签名覆盖确定性编码（防拼接歧义）：
  *   "mychat:name-v1:" || len(name)(2B 大端) || name(UTF-8) || did(UTF-8) || ktIndex(8B 大端)
  */
-import { concatBytes, utf8ToBytes } from "../codec";
-import { ed25519Sign, ed25519Verify } from "../crypto";
-import { didToEd25519PublicKey } from "./did";
-import type { UserNameRecord } from "../protocol/interfaces";
+import { concatBytes, utf8ToBytes } from "../codec/index.ts";
+import { ed25519Sign, ed25519Verify } from "../crypto/index.ts";
+import { didToEd25519PublicKey } from "./did.ts";
+import type { UserNameRecord } from "../protocol/interfaces.ts";
 
 /** 域分隔前缀，含格式版本 v1 */
 const USERNAME_SIGNING_PREFIX = "mychat:name-v1:";

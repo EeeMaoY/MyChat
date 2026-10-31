@@ -10,12 +10,12 @@ export {
   AEAD_TAG_LENGTH,
   aeadDecrypt,
   aeadEncrypt,
-} from "./aead";
+} from "./aead.ts";
 export {
   BLAKE3_OUTPUT_LENGTH,
   blake3Hash,
-} from "./hash";
-export { HKDF_OUTPUT_LENGTH, hkdfSha256 } from "./kdf";
+} from "./hash.ts";
+export { HKDF_OUTPUT_LENGTH, hkdfSha256 } from "./kdf.ts";
 export {
   KEY_LENGTH,
   type KeyPair,
@@ -27,4 +27,4 @@ export {
   randomBytes,
   x25519PublicKeyFromPrivate,
   x25519SharedSecret,
-} from "./keys";
+} from "./keys.ts";

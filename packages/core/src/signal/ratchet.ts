@@ -18,8 +18,8 @@ import {
   hkdfSha256,
   randomBytes,
   x25519SharedSecret,
-} from "../crypto";
-import { base58Encode, concatBytes } from "../codec";
+} from "../crypto/index.ts";
+import { base58Encode, concatBytes } from "../codec/index.ts";
 
 const ROOT_INFO = "mychat:dr:rk:v1";
 const CHAIN_INFO = "mychat:dr:ck:v1";

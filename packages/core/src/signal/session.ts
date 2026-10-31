@@ -12,20 +12,20 @@ import {
   type KeyPair,
   generateX25519KeyPair,
   hkdfSha256,
-} from "../crypto";
-import { base58Decode, base58Encode, concatBytes, utf8ToBytes } from "../codec";
-import type { Identity, PreKeyBundle } from "../identity";
-import { verifyPreKeyBundle } from "../identity";
-import { deriveSessionMailbox } from "../envelope";
+} from "../crypto/index.ts";
+import { base58Decode, base58Encode, concatBytes, utf8ToBytes } from "../codec/index.ts";
+import type { Identity, PreKeyBundle } from "../identity/index.ts";
+import { verifyPreKeyBundle } from "../identity/index.ts";
+import { deriveSessionMailbox } from "../envelope/index.ts";
 import {
   type RatchetState,
   ratchetDecrypt,
   ratchetEncrypt,
   ratchetInitInitiator,
   ratchetInitResponder,
-} from "./ratchet";
-import { x3dhAccept, x3dhAssociatedData, x3dhInitiate } from "./x3dh";
-import { decodeSessionWire, encodeSessionWire, type SessionWire } from "./wire";
+} from "./ratchet.ts";
+import { x3dhAccept, x3dhAssociatedData, x3dhInitiate } from "./x3dh.ts";
+import { decodeSessionWire, encodeSessionWire, type SessionWire } from "./wire.ts";
 
 /** 伪地址轮换周期：M0 取 1 分钟（设计报告 §5.1 epoch 轮换的演示尺度）。 */
 export const EPOCH_MS = 60_000;

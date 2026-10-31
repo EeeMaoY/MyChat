@@ -14,11 +14,11 @@ import {
   type KeyPair,
   hkdfSha256,
   x25519SharedSecret,
-} from "../crypto";
-import { concatBytes } from "../codec";
-import type { Identity } from "../identity";
-import type { PreKeyBundle } from "../identity";
-import { verifyPreKeyBundle } from "../identity";
+} from "../crypto/index.ts";
+import { concatBytes } from "../codec/index.ts";
+import type { Identity } from "../identity/index.ts";
+import type { PreKeyBundle } from "../identity/index.ts";
+import { verifyPreKeyBundle } from "../identity/index.ts";
 
 const X3DH_INFO = "mychat:x3dh:v1";
 /** curve25519 规范要求的 32 字节零前缀（F）。 */

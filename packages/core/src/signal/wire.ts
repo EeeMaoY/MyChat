@@ -7,8 +7,8 @@
  *
  * 时间戳按桶化处理由信封层负责（FR-3.3）；本层不携带任何明文可识别元数据。
  */
-import { concatBytes } from "../codec";
-import { type DrHeader, decodeHeader, encodeHeader } from "./ratchet";
+import { concatBytes } from "../codec/index.ts";
+import { type DrHeader, decodeHeader, encodeHeader } from "./ratchet.ts";
 
 export const KIND_INITIAL = 1;
 export const KIND_REGULAR = 2;
