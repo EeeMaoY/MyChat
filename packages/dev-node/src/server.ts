@@ -11,6 +11,7 @@ import { WebSocketServer, type WebSocket } from "ws";
 
 import type { KTEvent, UserNameRecord } from "@mychat/core";
 import {
+  base58Encode,
   didToEd25519PublicKey,
   decodePreKeyBundle,
   verifyPreKeyBundle,
@@ -20,9 +21,13 @@ import { envelopeFromJson, envelopeToJson, type EnvelopeJson } from "./wire.ts";
 import { RelayHub, type RelayDelivery, type RelayNotification } from "./relay.ts";
 import { appendEvent, createKTLogStore, ktLogInclusionProof, ktLogRoot, listEvents, type KTLogStore } from "./ktlog.ts";
 import {
+  assembleBundle,
+  consumeOpk,
   createBundleStore,
   createRegistryStore,
+  opkPoolStats,
   putBundle,
+  putOpks,
   registerRecord,
   resolveName,
   type BundleStore,
@@ -164,13 +169,43 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
           return sendError(res, 400, "bundle 验签失败或 DID 不匹配");
         }
         putBundle(state.bundles, did, new Uint8Array(body));
+        // bundle 上传同时把其中的 OPK 入池（M2-S9：池化分发）
+        putOpks(state.bundles, did, [
+          { id: bundle.opkId, public: base58Encode(bundle.opkPublic) },
+        ]);
         return sendJson(res, 201, { ok: true });
       }
+      if (req.method === "POST" && parts[4] === "opks") {
+        // OPK 池批量补充：{ opks: [{ id, public(base58) }] }
+        const body = await readJson(req);
+        if (!Array.isArray(body.opks)) return sendError(res, 400, "opks 字段非法");
+        try {
+          putOpks(
+            state.bundles,
+            did,
+            body.opks.map((o: { id: unknown; public: unknown }) => ({
+              id: Number(o.id),
+              public: String(o.public ?? ""),
+            })),
+          );
+        } catch (err) {
+          return sendError(res, 400, err instanceof Error ? err.message : "OPK 非法");
+        }
+        return sendJson(res, 201, { ok: true, stats: opkPoolStats(state.bundles, did) });
+      }
+      if (req.method === "DELETE" && parts[4] === "opk" && typeof parts[5] === "string") {
+        const opkId = Number(parts[5]);
+        const consumed = Number.isInteger(opkId) ? consumeOpk(state.bundles, did, opkId) : false;
+        return sendJson(res, 200, { consumed, stats: opkPoolStats(state.bundles, did) });
+      }
+      if (req.method === "GET" && parts[4] === "stats") {
+        return sendJson(res, 200, opkPoolStats(state.bundles, did));
+      }
       if (req.method === "GET") {
-        const stored = state.bundles.bundles.get(did);
-        if (!stored) return sendError(res, 404, "bundle 不存在");
+        const assembled = assembleBundle(state.bundles, did);
+        if (!assembled) return sendError(res, 404, "bundle 不存在");
         res.writeHead(200, { "content-type": "application/octet-stream" });
-        res.end(Buffer.from(stored));
+        res.end(Buffer.from(assembled.encoded));
         return;
       }
     }

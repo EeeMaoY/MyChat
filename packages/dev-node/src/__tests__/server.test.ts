@@ -17,6 +17,7 @@ import {
   ktVerifyInclusion,
   makeUserNameRecord,
   randomBytes,
+  base58Encode,
 } from "@mychat/core";
 
 import { startDevNode, type DevNode } from "../server";
@@ -67,6 +68,74 @@ describe("Registry（验签 + 重名拒绝 + KT 联动）", () => {
     expect(got.name).toBe("alice");
     expect(got.did).toBe(identity.did);
     expect(Buffer.from(got.signature, "base64")).toEqual(Buffer.from(record.signature));
+  });
+
+  it("OPK 池（M2-S9）：池化分发、一次性语义、消耗确认、低水位统计", async () => {
+    const { identity } = await registerUser("pooluser");
+    const did = identity.did;
+    const enc = (did2: string) => encodeURIComponent(did2);
+
+    // 先上传 bundle 模板（分发组装的前置；registerUser 只注册不传 bundle）
+    const templateSpk = generateX25519KeyPair();
+    const templateOpk = generateX25519KeyPair();
+    const template = issuePreKeyBundle(identity, templateSpk, { ...templateOpk, id: deriveOpkId(templateOpk.publicKey) }, 3_600_000);
+    const templatePut = await fetch(`${base}/v0/registry/bundle/${enc(did)}`, {
+      method: "PUT",
+      body: Buffer.from(encodePreKeyBundle(template)),
+    });
+    expect(templatePut.status).toBe(201);
+
+    // 补充 3 个 OPK 入池（public 统一 base58，与分发组装的解码一致）
+    const opks = [generateX25519KeyPair(), generateX25519KeyPair(), generateX25519KeyPair()].map((k) => ({
+      id: deriveOpkId(k.publicKey),
+      public: base58Encode(k.publicKey),
+    }));
+    // id 冲突规避：确保 id 互不相同（随机公钥指纹理论上可碰撞，这里防御）
+    const uniqueIds = new Set(opks.map((o) => o.id));
+    expect(uniqueIds.size).toBe(opks.length);
+
+    const add = await fetch(`${base}/v0/registry/bundle/${enc(did)}/opks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ opks }),
+    });
+    expect(add.status).toBe(201);
+    const statsAfterAdd = (await (await fetch(`${base}/v0/registry/bundle/${enc(did)}/stats`)).json()) as {
+      available: number;
+    };
+    expect(statsAfterAdd.available).toBe(4); // 模板 OPK 1 + 补充 3
+
+    // 连续分发 3 次：每次得到不同 OPK（一次性语义）
+    const seenIds: number[] = [];
+    for (let i = 0; i < 3; i++) {
+      const res = await fetch(`${base}/v0/registry/bundle/${enc(did)}`);
+      expect(res.status).toBe(200);
+      const decoded = decodePreKeyBundle(new Uint8Array(await res.arrayBuffer()));
+      expect(seenIds).not.toContain(decoded.opkId);
+      seenIds.push(decoded.opkId);
+    }
+    const statsAfterIssue = (await (await fetch(`${base}/v0/registry/bundle/${enc(did)}/stats`)).json()) as {
+      available: number;
+      issued: number;
+    };
+    expect(statsAfterIssue.available).toBe(1); // 池共 4（模板 1 + 补充 3），已发 3
+    expect(statsAfterIssue.issued).toBe(3);
+
+    // 第 4 次分发：池空 → 复用（一次性退化，已知边界）
+    const reuse = await fetch(`${base}/v0/registry/bundle/${enc(did)}`);
+    expect(reuse.status).toBe(200);
+
+    // 消耗确认：DELETE 后池与 issued 同步移除
+    const del = await fetch(`${base}/v0/registry/bundle/${enc(did)}/opk/${seenIds[0]}`, { method: "DELETE" });
+    const delBody = (await del.json()) as { consumed: boolean };
+    expect(delBody.consumed).toBe(true);
+    const statsAfterConsume = (await (await fetch(`${base}/v0/registry/bundle/${enc(did)}/stats`)).json()) as {
+      available: number;
+      issued: number;
+    };
+    // 语义确认：DELETE 移除的是已发出的 OPK（issued 与池同步收缩）；池中剩余全部处于已发状态
+    expect(statsAfterConsume.issued).toBe(3);
+    expect(statsAfterConsume.available).toBe(0);
   });
 
   it("bundle 分发：有效上传 201 / 查回一致 / 篡改与坏 DID 被拒 / 缺失 404", async () => {

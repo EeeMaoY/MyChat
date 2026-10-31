@@ -177,21 +177,6 @@ async function sendPayload(session: Session, peerRecvMailboxAt: number, payload:
   await append(mailboxId, seal(wire, mailboxId));
 }
 
-function receiveAll(session: Session, windows: number[]): { payload: unknown; raw: Uint8Array }[] {
-  const out: { payload: unknown; raw: Uint8Array }[] = [];
-  for (const at of windows) {
-    for (const envelope of syncFetch(sessionMailbox(session, "recv", at))) {
-      try {
-        const plaintext = sessionReceive(session, unseal(envelope));
-        out.push({ payload: JSON.parse(bytesToUtf8(plaintext)), raw: plaintext });
-      } catch {
-        /* 非本会话 */
-      }
-    }
-  }
-  return out;
-}
-
 async function receiveAllAsync(session: Session): Promise<{ payload: unknown; raw: Uint8Array }[]> {
   const now = Date.now();
   const out: { payload: unknown; raw: Uint8Array }[] = [];

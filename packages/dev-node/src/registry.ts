@@ -1,12 +1,17 @@
 /**
- * Registry（目录）实现：用户名 → DID 映射（协议接口见 @mychat/core）。
+ * Registry（目录）实现：用户名 → DID 映射 + 预密钥束/OPK 池分发（协议接口见 @mychat/core）。
  *
  * 信任边界（设计报告 §2.3）：节点验证记录签名后仅作"防垃圾准入"，
  * 映射的密码学可信性由客户端自行验签（SR-5）——节点拒绝无效记录，
  * 但客户端永远不因"节点接受了"而采信。
  */
 import type { UserNameRecord } from "@mychat/core";
-import { verifyUserNameRecord } from "@mychat/core";
+import {
+  base58Decode,
+  decodePreKeyBundle,
+  encodePreKeyBundle,
+  verifyUserNameRecord,
+} from "@mychat/core";
 
 export interface RegistryStore {
   records: Map<string, UserNameRecord>;
@@ -41,21 +46,95 @@ export function resolveName(store: RegistryStore, name: string): UserNameRecord 
 }
 
 /**
- * 预密钥束分发表（Registry 角色的 M0 扩展，设计报告 §5.2）：
- * bundle 经节点验签后按 DID 存取——"任何人可读的公开身份材料"。
- * 存储键为 DID（每用户当前 bundle），bundle 轮换与历史版本为 M1。
+ * 预密钥束分发（Registry 角色的 M2 扩展，设计报告 §5.2 + M2 计划 §3.1）：
+ * - bundle 主体（IK-x/SPK 材料 + 签名）按 DID 存"当前版本"；
+ * - OPK 池独立存储；GET 时节点从池中挑一个未发出的 OPK 组装进 bundle 返回，
+ *   返回即标记已发（服务端一次性语义，Signal 规范）；
+ * - 响应方 accept 成功后经 DELETE 确认消耗；池空时复用已发 OPK（一次性退化为
+ *   已知边界，协议规范 §10）。
  */
 export interface BundleStore {
+  /** did → 编码 bundle（模板，含最近一次上传的 OPK 字段——分发时会被池中 OPK 替换） */
   bundles: Map<string, Uint8Array>;
+  /** did → (opkId → opkPublic base58) */
+  opkPools: Map<string, Map<number, string>>;
+  /** did → 已随 bundle 发出、尚未被 accept 确认消耗的 opkId 集 */
+  issued: Map<string, Set<number>>;
 }
 
 export function createBundleStore(): BundleStore {
-  return { bundles: new Map() };
+  return { bundles: new Map(), opkPools: new Map(), issued: new Map() };
 }
 
 export function putBundle(store: BundleStore, did: string, bundle: Uint8Array): void {
-  // CID 语义留给客户端校验；节点只做定长防护（编码 251B v1，留余量）
   if (bundle.length === 0 || bundle.length > 1024) throw new Error("bundle 长度非法");
   store.bundles.set(did, bundle);
+}
+
+/** 上传 OPK 入池（幂等；池上限 256，防滥用）。 */
+export function putOpks(store: BundleStore, did: string, opks: { id: number; public: string }[]): void {
+  let pool = store.opkPools.get(did);
+  if (!pool) {
+    pool = new Map();
+    store.opkPools.set(did, pool);
+  }
+  for (const opk of opks) {
+    if (!Number.isInteger(opk.id) || opk.id < 0) throw new Error("opkId 非法");
+    if (typeof opk.public !== "string" || opk.public.length === 0 || opk.public.length > 128) {
+      throw new Error("opk 公钥非法");
+    }
+    if (pool.size >= 256 && !pool.has(opk.id)) throw new Error("OPK 池已满");
+    pool.set(opk.id, opk.public);
+  }
+}
+
+export interface AssembledBundle {
+  encoded: Uint8Array;
+  /** 本次分发使用的 OPK（池空时为 null，bundle 保留模板 OPK 字段） */
+  usedOpkId: number | null;
+}
+
+/** 组装分发：模板 + 池中一个未发出的 OPK；返回即标记已发。 */
+export function assembleBundle(store: BundleStore, did: string): AssembledBundle | undefined {
+  const template = store.bundles.get(did);
+  if (!template) return undefined;
+  const pool = store.opkPools.get(did);
+  const issued = store.issued.get(did) ?? new Set<number>();
+  if (!store.issued.has(did)) store.issued.set(did, issued);
+
+  let usedOpkId: number | null = null;
+  let assembled = template;
+  if (pool && pool.size > 0) {
+    const fresh = [...pool.entries()].find(([id]) => !issued.has(id));
+    const [opkId, opkPublic] = fresh ?? [...pool.entries()][0]!;
+    try {
+      const decoded = decodePreKeyBundle(template);
+      // 公钥字段为 base58 文本 → 字节
+      assembled = encodePreKeyBundle({ ...decoded, opkId, opkPublic: base58Decode(opkPublic) });
+      usedOpkId = opkId;
+      issued.add(opkId);
+    } catch {
+      // 模板解码失败（脏数据）：原样返回
+      assembled = template;
+    }
+  }
+  return { encoded: assembled, usedOpkId };
+}
+
+/** 响应方 accept 成功后的消耗确认：从池与 issued 中移除。 */
+export function consumeOpk(store: BundleStore, did: string, opkId: number): boolean {
+  const pool = store.opkPools.get(did);
+  const issued = store.issued.get(did);
+  const had = pool?.delete(opkId) ?? false;
+  issued?.delete(opkId);
+  return had;
+}
+
+/** 池水位（客户端低水位补充用）。 */
+export function opkPoolStats(store: BundleStore, did: string): { available: number; issued: number } {
+  const pool = store.opkPools.get(did);
+  const issued = store.issued.get(did);
+  const issuedCount = issued ? [...issued].filter((id) => pool?.has(id)).length : 0;
+  return { available: (pool?.size ?? 0) - issuedCount, issued: issuedCount };
 }
 
