@@ -16,6 +16,7 @@ import {
   setupGuardians,
   submitUsername,
   useAppState,
+  rehearseRecovery,
 } from "../lib/app";
 
 import { NAME_RE, shortDid } from "./format";
@@ -62,6 +63,9 @@ export default function ProfileModal({ onClose }: Props) {
   // —— 紧急联系人 ——
   const [recoverySelf, setRecoverySelf] = useState<RecoverySelfInfo | null>(null);
   const [selfLoaded, setSelfLoaded] = useState(false);
+  /** 恢复演练进行中与结果。 */
+  const [rehearsePending, setRehearsePending] = useState(false);
+  const [rehearseResult, setRehearseResult] = useState<{ ok: boolean; checks: { name: string; ok: boolean; detail: string }[] } | null>(null);
   /** 重新设置模式（选择列表覆盖已设置状态）。 */
   const [editingGuardians, setEditingGuardians] = useState(false);
   const [selectedDids, setSelectedDids] = useState<ReadonlySet<string>>(new Set());
@@ -391,6 +395,20 @@ export default function ProfileModal({ onClose }: Props) {
             <div className="modal-actions">
               <button
                 className="btn-ghost"
+                disabled={rehearsePending}
+                onClick={async () => {
+                  setRehearsePending(true);
+                  try {
+                    setRehearseResult(await rehearseRecovery());
+                  } finally {
+                    setRehearsePending(false);
+                  }
+                }}
+              >
+                {rehearsePending ? "演练中…" : "恢复演练"}
+              </button>
+              <button
+                className="btn-ghost"
                 onClick={() => {
                   setSelectedDids(new Set(recoverySelf.guardians));
                   setEditingGuardians(true);
@@ -399,6 +417,17 @@ export default function ProfileModal({ onClose }: Props) {
                 重新设置
               </button>
             </div>
+            {rehearseResult !== null && (
+              <ul className="boundary-list">
+                {rehearseResult.checks.map((c) => (
+                  <li key={c.name}>
+                    {c.ok ? "✅" : "⚠️"} {c.name}
+                    {c.detail ? `——${c.detail}` : ""}
+                  </li>
+                ))}
+                <li>{rehearseResult.ok ? "✅ 演练通过：恢复所需的公告、包裹与守护者会话均就绪。" : "⚠️ 存在未就绪项，请先处理后再依赖社交恢复。"}</li>
+              </ul>
+            )}
           </div>
         )
       )}
