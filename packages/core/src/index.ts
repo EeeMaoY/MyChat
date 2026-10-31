@@ -25,3 +25,5 @@ export * from "./store/index.ts";
 export * from "./attachment/index.ts";
 export * from "./ssss/index.ts";
 export * from "./ktmerkle/index.ts";
+export * from "./recovery/index.ts";
+

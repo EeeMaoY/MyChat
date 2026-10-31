@@ -11,6 +11,7 @@ export {
   aeadDecrypt,
   aeadEncrypt,
 } from "./aead.ts";
+export { openWithEd25519, sealToEd25519 } from "./ecies.ts";
 export {
   BLAKE3_OUTPUT_LENGTH,
   blake3Hash,
