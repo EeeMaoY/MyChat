@@ -1,18 +1,23 @@
 /**
- * MyChat dev-node —— 服务域单体开发节点（ADR-11）
+ * MyChat dev-node 入口：启动单体开发节点。
  *
- * 单进程实现四类协议接口，协议边界自第一天分离
- * （接口定义见 @mychat/core `src/protocol/interfaces.ts`）：
+ * 环境变量：
+ *   MYCHAT_PORT  监听端口（默认 8629）
+ *   MYCHAT_HOST  监听地址（默认 127.0.0.1）
  *
- *   Relay    中继池：在线密文包投递（计划于 S2 迭代实现）
- *   Storage  存储节点：信箱与加密块
- *   Registry 目录：用户名 → DID 映射
- *   KTLog    密钥透明日志：映射变更历史（v0: append-only）
- *
- * 注意：单体形态仅为开发/演示环境的部署属性，
- * 任何第三方可按四接口独立实现并部署自己的节点。
+ * 注意：内存态，无持久化——开发/演示环境属性，生产多节点部署为后续里程碑。
  */
+import { startDevNode } from "./server";
 
-const ROLES = ["Relay", "Storage", "Registry", "KTLog"] as const;
+const port = Number(process.env.MYCHAT_PORT ?? "8629");
+const host = process.env.MYCHAT_HOST ?? "127.0.0.1";
 
-console.log(`[mychat-dev-node] 骨架就绪。待实现接口：${ROLES.join(" / ")}（S2 迭代）`);
+const node = await startDevNode({ port, host });
+
+console.log(`[mychat-dev-node] 监听 http://${host}:${node.port}`);
+console.log("[mychat-dev-node] 角色：Relay / Storage / Registry / KTLog（协议接口分离，ADR-11）");
+console.log("[mychat-dev-node] 开发环境属性：内存态、单点部署。仅见密文，无用户数据信任。");
+
+process.on("SIGINT", () => {
+  void node.close().then(() => process.exit(0));
+});

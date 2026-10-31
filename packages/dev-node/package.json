@@ -6,10 +6,17 @@
   "description": "MyChat 服务域单体开发节点（协议接口分离，ADR-11）",
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",
-    "start": "node src/index.ts"
+    "start": "node src/index.ts",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mychat/core": "*",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
-    "typescript": "^5.6.0"
+    "@types/ws": "^8.5.13",
+    "typescript": "^5.6.0",
+    "vitest": "^3.0.0"
   }
 }
