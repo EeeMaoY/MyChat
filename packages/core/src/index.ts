@@ -22,3 +22,4 @@ export * from "./identity/index.ts";
 export * from "./signal/index.ts";
 export * from "./envelope/index.ts";
 export * from "./store/index.ts";
+export * from "./attachment/index.ts";
