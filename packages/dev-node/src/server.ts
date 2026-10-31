@@ -63,6 +63,16 @@ export function startDevNode(opts: { port?: number; host?: string } = {}): Promi
   };
 
   const server = createServer((req, res) => {
+    // CORS：dev 节点是零信任公共基础设施，浏览器客户端可从任意 origin 访问
+    // （生产多节点部署时仍按本语义开放——节点不作鉴权裁决）
+    res.setHeader("access-control-allow-origin", "*");
+    res.setHeader("access-control-allow-methods", "GET, POST, PUT, OPTIONS");
+    res.setHeader("access-control-allow-headers", "content-type");
+    if (req.method === "OPTIONS") {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
     handleHttp(state, req, res).catch(() => {
       if (!res.headersSent) sendError(res, 500, "内部错误");
       res.end();
