@@ -5,7 +5,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 
-import type { Envelope } from "@mychat/core";
+import type { Envelope, KTEvent, KtInclusionProof } from "@mychat/core";
 import {
   AEAD_NONCE_LENGTH,
   createIdentity,
@@ -14,6 +14,7 @@ import {
   encodePreKeyBundle,
   generateX25519KeyPair,
   issuePreKeyBundle,
+  ktVerifyInclusion,
   makeUserNameRecord,
   randomBytes,
 } from "@mychat/core";
@@ -134,6 +135,42 @@ describe("Registry（验签 + 重名拒绝 + KT 联动）", () => {
     expect(events).toHaveLength(1);
     expect(events[0]!.type).toBe("register");
     expect(events[0]!.did).toBe(identity.did);
+  });
+
+  it("KT Merkle：root/proof 端点与客户端核验互操作（FR-1.6 M1）", async () => {
+    // 三个用户注册 → 日志 3 个事件
+    const ids = [];
+    for (const name of ["ktuser1", "ktuser2", "ktuser3"]) {
+      const { identity } = await registerUser(name);
+      ids.push(identity.did);
+    }
+    const rootRes = await fetch(`${base}/v0/kt/root`);
+    const { size, root } = (await rootRes.json()) as { size: number; root: string };
+    expect(size).toBeGreaterThanOrEqual(3);
+    expect(root.length).toBeGreaterThan(0);
+
+    // 逐事件：list 取回 → 重构 KTEvent → proof 验证
+    for (const [i, did] of ids.entries()) {
+      const listRes = await fetch(`${base}/v0/kt/list/${encodeURIComponent(did)}`);
+      const { events } = (await listRes.json()) as { events: { did: string; type: string; index: number; payload: string }[] };
+      const event = events[0]!;
+      const ktEvent: KTEvent = {
+        did: event.did,
+        type: event.type as KTEvent["type"],
+        index: event.index,
+        payload: new Uint8Array(Buffer.from(event.payload, "base64")),
+      };
+      const proofRes = await fetch(`${base}/v0/kt/proof/${event.index}`);
+      expect(proofRes.status).toBe(200);
+      const { proof } = (await proofRes.json()) as { proof: KtInclusionProof };
+      expect(ktVerifyInclusion(ktEvent, proof, root)).toBe(true);
+      void i;
+    }
+    // 篡改事件后验证必须失败
+    const proofRes = await fetch(`${base}/v0/kt/proof/0`);
+    const { proof } = (await proofRes.json()) as { proof: KtInclusionProof };
+    const fake: KTEvent = { did: "did:mychat:fake", type: "register", payload: new Uint8Array(1), index: 0 };
+    expect(ktVerifyInclusion(fake, proof, root)).toBe(false);
   });
 
   it("非法用户名（含特殊字符）被拒", async () => {

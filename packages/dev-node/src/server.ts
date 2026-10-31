@@ -17,7 +17,7 @@ import {
 } from "@mychat/core";
 import { envelopeFromJson, envelopeToJson, type EnvelopeJson } from "./wire.ts";
 import { RelayHub, type RelayDelivery, type RelayNotification } from "./relay.ts";
-import { appendEvent, createKTLogStore, listEvents, type KTLogStore } from "./ktlog.ts";
+import { appendEvent, createKTLogStore, ktLogInclusionProof, ktLogRoot, listEvents, type KTLogStore } from "./ktlog.ts";
 import {
   createBundleStore,
   createRegistryStore,
@@ -173,6 +173,15 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
     }
 
     // ----- KT Log -----
+    if (req.method === "GET" && url.pathname === "/v0/kt/root") {
+      return sendJson(res, 200, ktLogRoot(state.ktlog));
+    }
+    if (req.method === "GET" && parts[1] === "kt" && parts[2] === "proof" && typeof parts[3] === "string") {
+      const index = Number(parts[3]);
+      const proof = Number.isInteger(index) && index >= 0 ? ktLogInclusionProof(state.ktlog, index) : undefined;
+      if (!proof) return sendError(res, 404, "证明不存在（序号越界）");
+      return sendJson(res, 200, { proof });
+    }
     if (req.method === "GET" && parts[1] === "kt" && parts[2] === "list" && typeof parts[3] === "string") {
       return sendJson(res, 200, { events: listEvents(state.ktlog, decodeURIComponent(parts[3])).map(serializeKTEvent) });
     }
