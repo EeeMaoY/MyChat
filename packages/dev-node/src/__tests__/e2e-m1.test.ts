@@ -348,8 +348,8 @@ describe("M1 社交恢复全流程", () => {
     const rk = recoverRk(collected, 32);
     const wrapRes = await fetch(`${base}/v0/storage/blocks/${encodeURIComponent(setup.wrapCid)}`);
     const wrap = new Uint8Array(await wrapRes.arrayBuffer());
-    const restoredJson = openIdentityWrap(rk, wrap);
-    const restored = (await import("@mychat/core")).deserializeIdentity(restoredJson);
+    const restoredPayload = openIdentityWrap(rk, wrap);
+    const restored = (await import("@mychat/core")).deserializeIdentity(restoredPayload.identityJson);
     expect(restored.did).toBe(owner.identity.did);
     expect(restored.ikEd.privateKey).toEqual(owner.identity.ikEd.privateKey);
 

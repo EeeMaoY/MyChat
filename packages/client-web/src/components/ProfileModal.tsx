@@ -232,7 +232,8 @@ export default function ProfileModal({ onClose }: Props) {
     setRecoverySelf(self);
     setEditingGuardians(false);
     setSelectedDids(new Set());
-    setNotice(`紧急联系人已设置：${dids.length} 位守护者，任意 ${GUARDIAN_THRESHOLD} 位可帮你找回账号`);
+    const effectiveThreshold = Math.min(GUARDIAN_THRESHOLD, dids.length);
+    setNotice(`紧急联系人已设置：${dids.length} 位守护者，任意 ${effectiveThreshold} 位可帮你找回账号`);
   }
 
   /** 联系人展示名（无名字时退回短 DID）。 */

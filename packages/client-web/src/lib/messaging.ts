@@ -138,8 +138,12 @@ const K_IDENTITY = "identity";
 const K_MY_NAME = "my-name";
 const K_SPK = "spk";
 const K_OPK = "opk";
+const K_OPK_POOL = "opk-pool";
 const K_MSG_SEQ = "msgseq";
 const SETTING_READ_RECEIPTS = "setting:read-receipts";
+/** OPK 池目标规模与低水位（M2 计划 §3.1：低于水位自动补充）。 */
+export const OPK_POOL_TARGET = 20;
+export const OPK_POOL_LOW = 5;
 const contactKey = (did: string) => `contact:${did}`;
 const sessionKey = (did: string) => `session:${did}`;
 const msgKey = (did: string, seq: number) => `msg:${did}:${String(seq).padStart(8, "0")}`;
@@ -172,6 +176,10 @@ export class Messaging {
 
   private cursors = new Map<string, number>();
   private msgSeq = 0;
+  /** 本地持有私钥的 OPK 池（id → 密钥对；节点侧为对应公钥，M2-S9） */
+  private opkPool = new Map<number, KeyPair>();
+  /** 会话重建回调（KI-1：已知联系人新握手替换会话时上抛 UI 提示） */
+  onSessionRebuilt: ((did: string) => void) | null = null;
   /** message.id → kv 键（回执更新重写旧消息时定位原键，避免写错序号） */
   private messageKeys = new Map<string, string>();
   /** 已确认发出 read 回执的 in 消息 id（幂等，防重复回执） */
@@ -203,13 +211,48 @@ export class Messaging {
     const m = new Messaging(deps);
     m.identity = createIdentity();
     await deps.kv.put(K_IDENTITY, utf8ToBytes(serializeIdentity(m.identity)));
-    // 预密钥材料（M0：单 SPK + 单 OPK，轮换为 M1）
+    // 预密钥材料（M2-S9：SPK + OPK 池）
     m.spk = generateX25519KeyPair();
     const opk = generateX25519KeyPair();
     m.opk = { ...opk, id: deriveOpkId(opk.publicKey) };
+    m.opkPool = new Map([[m.opk.id, { publicKey: opk.publicKey, privateKey: opk.privateKey }]]);
+    for (let i = 1; i < OPK_POOL_TARGET; i++) {
+      const k = generateX25519KeyPair();
+      m.opkPool.set(deriveOpkId(k.publicKey), k);
+    }
     await deps.kv.put(K_SPK, utf8ToBytes(JSON.stringify(kpToJson(m.spk))));
     await deps.kv.put(K_OPK, utf8ToBytes(JSON.stringify({ id: m.opk.id, ...kpToJson(opk) })));
+    await m.persistOpkPool();
     return m;
+  }
+
+  /** 持久化本地 OPK 池。 */
+  private async persistOpkPool(): Promise<void> {
+    const arr = [...this.opkPool.entries()].map(([id, kp]) => ({ id, ...kpToJson(kp) }));
+    await this.deps.kv.put(K_OPK_POOL, utf8ToBytes(JSON.stringify(arr)));
+  }
+
+  /** 向节点补充上传本地池中尚未登记的 OPK（bundle 主 OPK 由 setUsername 上传）。 */
+  async uploadOpkPool(): Promise<void> {
+    await this.deps.api.addOpks(
+      this.identity.did,
+      [...this.opkPool.entries()].map(([id, kp]) => ({ id, public: base58Encode(kp.publicKey) })),
+    );
+  }
+
+  /** 池低水位时自动补充至目标规模（accept 消耗后调用）。 */
+  private async topUpOpkPool(): Promise<void> {
+    if (this.opkPool.size >= OPK_POOL_LOW) return;
+    const batch = [];
+    while (this.opkPool.size < OPK_POOL_TARGET) {
+      const k = generateX25519KeyPair();
+      const id = deriveOpkId(k.publicKey);
+      if (this.opkPool.has(id)) continue;
+      this.opkPool.set(id, k);
+      batch.push({ id, public: base58Encode(k.publicKey) });
+    }
+    await this.persistOpkPool();
+    await this.deps.api.addOpks(this.identity.did, batch);
   }
 
   /** 与 identity/bundle 的 opkId 契约保持一致（见 deriveOpkId）。 */
@@ -224,6 +267,14 @@ export class Messaging {
     if (opkRaw) {
       const parsed = JSON.parse(bytesToUtf8(opkRaw)) as { id: number } & StoredKeyPair;
       this.opk = { id: parsed.id, ...kpFromJson(parsed) };
+    }
+    // OPK 池（M2-S9）；旧版本仅单 OPK 时迁移入池
+    const poolRaw = await this.deps.kv.get(K_OPK_POOL);
+    if (poolRaw) {
+      const arr = JSON.parse(bytesToUtf8(poolRaw)) as ({ id: number } & StoredKeyPair)[];
+      this.opkPool = new Map(arr.map((o) => [o.id, kpFromJson(o)]));
+    } else if (this.opk) {
+      this.opkPool = new Map([[this.opk.id, { publicKey: this.opk.publicKey, privateKey: this.opk.privateKey }]]);
     }
   }
 
@@ -274,6 +325,7 @@ export class Messaging {
     this.opk.id = deriveOpkId(this.opk.publicKey);
     const bundle = this.issueBundle();
     await this.deps.api.putBundle(this.identity.did, encodePreKeyBundle(bundle));
+    await this.uploadOpkPool(); // M2-S9：其余池成员一并登记
     this.myName = name;
     await this.deps.kv.put(K_MY_NAME, utf8ToBytes(name));
     this.emit();
@@ -592,12 +644,12 @@ export class Messaging {
   /** 已收集的恢复分片（恢复收集器）。 */
   collectedShares: { shareX: number; shareY: string; fromDid: string }[] = [];
 
-  /** 恢复完成判定：收集数达门限后重组 RK → 解开身份包裹 → 返回身份 JSON。 */
+  /** 恢复完成判定：收集数达门限后重组 RK → 解开身份包裹（v2：身份 + 用户名）。 */
   async tryFinishRecovery(
     ownerDid: string,
     wrapCid: string,
     threshold: number,
-  ): Promise<string | null> {
+  ): Promise<{ identityJson: string; myName: string | null } | null> {
     if (this.collectedShares.length < threshold) return null;
     const shares = this.collectedShares.slice(0, threshold).map((s) => ({
       x: s.shareX,
@@ -607,6 +659,57 @@ export class Messaging {
     const wrapCiphertext = await this.deps.api.getBlock(wrapCid);
     if (!wrapCiphertext) throw new Error("身份包裹块不存在（节点无此数据）");
     return openIdentityWrap(rk, wrapCiphertext);
+  }
+
+  /**
+   * 恢复演练 v1（UX-2，M2 计划 §2 S9-⑦）：原机本地完整性检查。
+   * 完整演练（守护者实际回传分片）依赖守护者在线配合，UI 引导另行提示。
+   */
+  async rehearseRecovery(): Promise<{ ok: boolean; checks: { name: string; ok: boolean; detail: string }[] }> {
+    const checks: { name: string; ok: boolean; detail: string }[] = [];
+    const self = await this.getRecoverySelf();
+    checks.push({ name: "本地恢复设置存在", ok: self !== null, detail: self ? `门限 ${self.threshold}、守护者 ${self.guardians.length} 位` : "尚未设置紧急联系人" });
+    if (!self) return { ok: false, checks };
+
+    let announcement: Record<string, unknown> | null = null;
+    try {
+      announcement = await this.deps.api.getRecoveryAnnouncement(this.identity.did);
+    } catch {
+      announcement = null;
+    }
+    checks.push({ name: "恢复公告可获取", ok: announcement !== null, detail: announcement === null ? "节点上未找到公告" : "" });
+    if (announcement) {
+      let verified = false;
+      try {
+        const { verifyRecoveryAnnouncement } = await import("@mychat/core");
+        verified = verifyRecoveryAnnouncement({
+          did: String(announcement.did),
+          wrapCid: String(announcement.wrapCid),
+          threshold: Number(announcement.threshold),
+          guardians: announcement.guardians as string[],
+          signature: base58Decode(String(announcement.signature)),
+        });
+      } catch {
+        verified = false;
+      }
+      checks.push({ name: "公告签名验证", ok: verified, detail: verified ? "" : "公告签名与身份不匹配" });
+      const guardiansMatch =
+        JSON.stringify((announcement.guardians as string[]) ?? []) === JSON.stringify(self.guardians);
+      checks.push({ name: "守护者列表一致", ok: guardiansMatch, detail: guardiansMatch ? "" : "公告与本地设置不一致" });
+    }
+    let wrapOk = false;
+    try {
+      const wrap = await this.deps.api.getBlock(self.wrapCid);
+      wrapOk = wrap !== null && wrap.length > 0;
+    } catch {
+      wrapOk = false;
+    }
+    checks.push({ name: "身份包裹块可达", ok: wrapOk, detail: wrapOk ? "" : "节点上无法取回包裹块" });
+    for (const g of self.guardians) {
+      const inContacts = this.contacts.has(g);
+      checks.push({ name: `守护者会话有效（${g.slice(11, 22)}…）`, ok: inContacts, detail: inContacts ? "" : "该守护者不在联系人中，恢复时无法联系" });
+    }
+    return { ok: checks.every((c) => c.ok), checks };
   }
 
   // ----- 发送（FR-5.1 / FR-5.2 / FR-5.3 子集） -----
@@ -689,9 +792,15 @@ export class Messaging {
     return this.cursors.get(mailboxId) ?? 0;
   }
 
-  private async advanceCursor(mailboxId: string, cursor: number): Promise<void> {
+  /**
+   * cursor 治理（M2-S9 KI-3）：内存始终推进；**仅当本轮拉到过内容才落库**，
+   * 避免三 epoch 窗口轮换产生大量空信箱键导致本地存储膨胀。
+   */
+  private async advanceCursor(mailboxId: string, cursor: number, persist: boolean): Promise<void> {
     this.cursors.set(mailboxId, cursor);
-    await this.deps.kv.put(cursorKey(mailboxId), utf8ToBytes(String(cursor)));
+    if (persist) {
+      await this.deps.kv.put(cursorKey(mailboxId), utf8ToBytes(String(cursor)));
+    }
   }
 
   private async pollDiscovery(): Promise<void> {
@@ -701,7 +810,7 @@ export class Messaging {
     for (const envelope of envelopes) {
       await this.handleHandshake(envelope);
     }
-    await this.advanceCursor(mailboxId, next);
+    await this.advanceCursor(mailboxId, next, envelopes.length > 0);
   }
 
   private async handleHandshake(envelope: Envelope): Promise<void> {
@@ -720,24 +829,35 @@ export class Messaging {
     if (msg.kind !== 1) return;
 
     try {
-      const opkPool = new Map([[this.opk.id, this.opk]]);
+      // M2-S9：以全池 OPK 参与接受（任一匹配即可）；成功后消耗对应 OPK 并低水位补充
+      const opkPool = new Map([...this.opkPool.entries()].map(([id, kp]) => [id, kp]));
       const { session, plaintext } = acceptSession(this.identity, this.spk, opkPool, wire);
+      const usedOpkId = msg.x3dh.opkId;
+      if (this.opkPool.delete(usedOpkId)) {
+        await this.persistOpkPool();
+        void this.deps.api.consumeOpk(this.identity.did, usedOpkId).catch(() => undefined);
+        void this.topUpOpkPool().catch(() => undefined);
+      }
       const handshake = JSON.parse(bytesToUtf8(plaintext)) as HandshakePayload;
       if (handshake.v !== 1 || typeof handshake.fromDid !== "string") return;
-      if (this.contacts.has(handshake.fromDid)) return; // 已是联系人：忽略重复握手
 
+      // M2-S9 会话重建（KI-1）：已知联系人的新握手接受并替换会话（消息历史保留）
+      const existed = this.contacts.has(handshake.fromDid);
       this.sessions.set(handshake.fromDid, session);
-      this.contacts.set(handshake.fromDid, {
-        did: handshake.fromDid,
-        name: handshake.fromName ?? null,
-        addedAt: Date.now(),
-      });
-      await this.saveContact(handshake.fromDid);
+      if (!existed) {
+        this.contacts.set(handshake.fromDid, {
+          did: handshake.fromDid,
+          name: handshake.fromName ?? null,
+          addedAt: Date.now(),
+        });
+        await this.saveContact(handshake.fromDid);
+        await this.appendLocalMessage(handshake.fromDid, "in", handshake.note, "handshake");
+      }
       await this.saveSession(handshake.fromDid);
-      await this.appendLocalMessage(handshake.fromDid, "in", handshake.note, "handshake");
-      this.restartRealtime(); // 新会话需订阅其接收信箱
+      if (existed) this.onSessionRebuilt?.(handshake.fromDid);
+      this.restartRealtime(); // 新/重建会话需订阅其接收信箱
     } catch {
-      // OPK 消耗/篡改等失败：忽略（陌生人重放握手被天然拒绝）
+      // OPK 全部消耗/篡改等失败：忽略（陌生人重放握手被天然拒绝）
     }
   }
 
@@ -760,7 +880,7 @@ export class Messaging {
           // 篡改/重放/跨会话密文：丢弃（SR-4）
         }
       }
-      await this.advanceCursor(mailboxId, next);
+      await this.advanceCursor(mailboxId, next, envelopes.length > 0);
     }
     // delivered 回执：本轮拉取到的内容类消息聚合为一条（MR-1）
     if (deliveredIds.length > 0) {

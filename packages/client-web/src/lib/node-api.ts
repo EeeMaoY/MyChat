@@ -102,6 +102,25 @@ export class NodeApi {
     return new Uint8Array(await res.arrayBuffer());
   }
 
+  // ----- OPK 池（M2-S9） -----
+
+  async addOpks(did: string, opks: { id: number; public: string }[]): Promise<void> {
+    if (opks.length === 0) return;
+    const res = await fetch(`${this.baseUrl}/v0/registry/bundle/${encodeURIComponent(did)}/opks`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ opks }),
+    });
+    if (!res.ok) await readError(res);
+  }
+
+  async consumeOpk(did: string, opkId: number): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/v0/registry/bundle/${encodeURIComponent(did)}/opk/${opkId}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) await readError(res);
+  }
+
   // ----- 恢复公告（社交恢复 FR-1.3） -----
 
   async putRecoveryAnnouncement(did: string, announcement: unknown): Promise<void> {

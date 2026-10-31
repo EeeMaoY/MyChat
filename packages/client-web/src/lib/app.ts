@@ -281,16 +281,19 @@ export async function recoveryPollCollect(): Promise<{ done: boolean; progress: 
   await recoveryCtx.messaging.poll();
   const { collectedShares } = recoveryCtx.messaging;
   if (collectedShares.length >= recoveryCtx.threshold) {
-    const identityJson = await recoveryCtx.messaging.tryFinishRecovery(
+    const payload = await recoveryCtx.messaging.tryFinishRecovery(
       recoveryCtx.ownerDid,
       recoveryCtx.wrapCid,
       recoveryCtx.threshold,
     );
-    if (identityJson && kv) {
-      // 写入本机并重建真实会话
-      const { deserializeIdentity } = await import("@mychat/core");
-      const identity = deserializeIdentity(identityJson);
-      await kv.put("identity", new TextEncoder().encode(identityJson));
+    if (payload && kv) {
+      // 写入本机并重建真实会话（wrap v2：身份 + 用户名一起回填，KI-2）
+      const { deserializeIdentity, utf8ToBytes } = await import("@mychat/core");
+      const identity = deserializeIdentity(payload.identityJson);
+      await kv.put("identity", utf8ToBytes(payload.identityJson));
+      if (payload.myName !== null) {
+        await kv.put("my-name", utf8ToBytes(payload.myName));
+      }
       const api = new NodeApi(nodeBaseUrl());
       messaging = await Messaging.load({ api, kv });
       if (messaging) {
@@ -365,6 +368,10 @@ export async function setNotificationsEnabled(enabled: boolean): Promise<void> {
 /** 注册新消息系统通知（页面隐藏时才打扰；点击聚焦并打开会话）。 */
 function bindNotifications(): void {
   if (!messaging) return;
+  messaging.onSessionRebuilt = (did) => {
+    if (state.phase === "main") setNotice("联系人更换了设备，加密会话已自动重建");
+    void did;
+  };
   messaging.onIncomingMessage = (message) => {
     if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
     if (!document.hidden) return;
@@ -382,6 +389,14 @@ function bindNotifications(): void {
       };
     });
   };
+}
+
+export async function rehearseRecovery(): Promise<{ ok: boolean; checks: { name: string; ok: boolean; detail: string }[] }> {
+  return (await messaging?.rehearseRecovery()) ?? { ok: false, checks: [] };
+}
+
+export function bindSessionRebuilt(handler: (did: string) => void): void {
+  if (messaging) messaging.onSessionRebuilt = handler;
 }
 
 export type { ChatMessage, Contact };
