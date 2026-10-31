@@ -85,6 +85,7 @@ export async function bootstrap(): Promise<void> {
     return;
   }
   messaging.onStateChange = syncFromMessaging;
+  bindNotifications();
   setState({ phase: "main", did: messaging.identity.did });
   syncFromMessaging();
   messaging.startRealtime();
@@ -98,6 +99,7 @@ export async function createMyIdentity(): Promise<void> {
   const api = new NodeApi(nodeBaseUrl());
   messaging = await Messaging.createNew({ api, kv });
   messaging.onStateChange = syncFromMessaging;
+  bindNotifications();
   pendingName = null;
   setState({ phase: "set-name", did: messaging.identity.did });
 }
@@ -217,6 +219,169 @@ export async function decryptCustodyCopy(copy: {
 }): Promise<string> {
   if (!messaging) throw new Error("应用尚未就绪");
   return messaging.decryptCustodyCopy(copy);
+}
+
+// ---------- 社交恢复向导（FR-1.3，无身份状态下的独立流程） ----------
+
+/**
+ * 恢复流程状态：以临时身份（内存库，不落盘）与守护者建立会话并收集分片。
+ * 分片达门限后解开身份包裹，把恢复出的身份写入本机，随后由调用方引导托管副本恢复。
+ */
+let recoveryCtx: { messaging: Messaging; ownerDid: string; wrapCid: string; threshold: number } | null = null;
+
+export interface RecoveryStepResult {
+  ok: boolean;
+  error?: string;
+}
+
+/** 第 1 步：输入被恢复账户的用户名，拉取并验证恢复公告，建立恢复上下文。 */
+export async function recoveryStart(ownerName: string): Promise<RecoveryStepResult> {
+  try {
+    const { createMemoryKVStore } = await import("@mychat/core");
+    const api = new NodeApi(nodeBaseUrl());
+    const record = await api.resolve(ownerName);
+    if (!record) return { ok: false, error: "用户名不存在" };
+    const announcement = await api.getRecoveryAnnouncement(record.did);
+    if (!announcement) return { ok: false, error: "该账户未设置社交恢复" };
+
+    const kv = await createMemoryKVStore();
+    const messaging = await Messaging.createNew({ api, kv });
+    recoveryCtx = {
+      messaging,
+      ownerDid: record.did,
+      wrapCid: String(announcement.wrapCid ?? ""),
+      threshold: Number(announcement.threshold ?? 3),
+    };
+    setState({ phase: "main", did: messaging.identity.did, notice: "恢复模式：请添加全部紧急联系人并发起请求" });
+    syncFromMessaging();
+    messaging.startRealtime();
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "恢复启动失败" };
+  }
+}
+
+/** 第 2 步：以临时身份添加守护者（复用加好友握手；守护者侧将看到恢复请求说明）。 */
+export async function recoveryAddGuardian(name: string): Promise<RecoveryStepResult> {
+  if (!recoveryCtx) return { ok: false, error: "请先启动恢复流程" };
+  const err = await recoveryCtx.messaging.addFriend(name, `我是账户 ${recoveryCtx.ownerDid} 的所有者，正在通过紧急联系人恢复访问权限`);
+  return err === null ? { ok: true } : { ok: false, error: err };
+}
+
+/** 第 3 步：向全部守护者广播恢复请求（触发对方的分片回传）。 */
+export async function recoveryRequestShares(): Promise<RecoveryStepResult> {
+  if (!recoveryCtx) return { ok: false, error: "请先启动恢复流程" };
+  await recoveryCtx.messaging.sendRecoveryRequest(recoveryCtx.ownerDid);
+  return { ok: true };
+}
+
+/** 第 4 步：轮询收集；达标后返回恢复出的身份 JSON（调用方完成导入）。 */
+export async function recoveryPollCollect(): Promise<{ done: boolean; progress: number; needed: number }> {
+  if (!recoveryCtx) return { done: false, progress: 0, needed: 0 };
+  await recoveryCtx.messaging.poll();
+  const { collectedShares } = recoveryCtx.messaging;
+  if (collectedShares.length >= recoveryCtx.threshold) {
+    const identityJson = await recoveryCtx.messaging.tryFinishRecovery(
+      recoveryCtx.ownerDid,
+      recoveryCtx.wrapCid,
+      recoveryCtx.threshold,
+    );
+    if (identityJson && kv) {
+      // 写入本机并重建真实会话
+      const { deserializeIdentity } = await import("@mychat/core");
+      const identity = deserializeIdentity(identityJson);
+      await kv.put("identity", new TextEncoder().encode(identityJson));
+      const api = new NodeApi(nodeBaseUrl());
+      messaging = await Messaging.load({ api, kv });
+      if (messaging) {
+        messaging.onStateChange = syncFromMessaging;
+        bindNotifications();
+        setState({ phase: "main", did: identity.did, notice: "身份已通过紧急联系人恢复" });
+        syncFromMessaging();
+        messaging.startRealtime();
+        void messaging.poll();
+        recoveryCtx = null;
+        return { done: true, progress: 1, needed: 1 };
+      }
+    }
+  }
+  return {
+    done: false,
+    progress: collectedShares.length,
+    needed: recoveryCtx.threshold,
+  };
+}
+
+// ---------- 守护者与恢复请求（守护者侧 UI 接入） ----------
+
+export async function setupGuardians(guardianDids: string[], threshold = 3): Promise<RecoveryStepResult> {
+  if (!messaging) return { ok: false, error: "应用尚未就绪" };
+  try {
+    await messaging.setupGuardians(guardianDids, threshold);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "设置失败" };
+  }
+}
+
+export async function getRecoverySelf(): Promise<{ wrapCid: string; threshold: number; guardians: string[] } | null> {
+  return (await messaging?.getRecoverySelf()) ?? null;
+}
+
+export async function listGuardianships(): Promise<{ ownerDid: string; wrapCid: string }[]> {
+  return (await messaging?.listGuardianships()) ?? [];
+}
+
+export async function listRecoveryRequests(): Promise<{ ownerDid: string; fromDid: string }[]> {
+  return (await messaging?.listRecoveryRequests()) ?? [];
+}
+
+export async function confirmRecoveryRequest(fromDid: string, ownerDid: string): Promise<RecoveryStepResult> {
+  try {
+    await messaging?.confirmRecoveryRequest(fromDid, ownerDid);
+    return { ok: true };
+  } catch (err) {
+    return { ok: false, error: err instanceof Error ? err.message : "确认失败" };
+  }
+}
+
+export async function rejectRecoveryRequest(fromDid: string): Promise<void> {
+  await messaging?.rejectRecoveryRequest(fromDid);
+}
+
+/** 通知开关（kv 持久化；浏览器授权由调用方触发 requestPermission，S8/W2）。 */
+export async function getNotificationsEnabled(): Promise<boolean> {
+  const raw = await kv?.get("setting:notifications");
+  return raw === undefined ? true : new TextDecoder().decode(raw) === "on";
+}
+
+export async function setNotificationsEnabled(enabled: boolean): Promise<void> {
+  await kv?.put("setting:notifications", new TextEncoder().encode(enabled ? "on" : "off"));
+  if (enabled && typeof Notification !== "undefined" && Notification.permission === "default") {
+    void Notification.requestPermission();
+  }
+}
+
+/** 注册新消息系统通知（页面隐藏时才打扰；点击聚焦并打开会话）。 */
+function bindNotifications(): void {
+  if (!messaging) return;
+  messaging.onIncomingMessage = (message) => {
+    if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+    if (!document.hidden) return;
+    void getNotificationsEnabled().then((enabled) => {
+      if (!enabled) return;
+      const contact = messaging?.contacts.get(message.did);
+      const notification = new Notification(`MyChat · ${contact?.name ?? "新消息"}`, {
+        body: message.text.slice(0, 80),
+        tag: message.did,
+      });
+      notification.onclick = () => {
+        window.focus();
+        openChat(message.did);
+        notification.close();
+      };
+    });
+  };
 }
 
 export type { ChatMessage, Contact };

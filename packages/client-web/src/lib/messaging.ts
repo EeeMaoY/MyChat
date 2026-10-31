@@ -19,6 +19,7 @@ import {
   type KeyPair,
   type PreKeyBundle,
   type Session,
+  createRecoverySetup,
   deriveOpkId,
   deserializeIdentity,
   deserializeSession,
@@ -28,7 +29,11 @@ import {
   issuePreKeyBundle,
   makeEnvelope,
   makeUserNameRecord,
+  openGuardianShare,
+  openIdentityWrap,
   padClassForLength,
+  recoverRk,
+  sealGuardianShare,
   serializeIdentity,
   serializeSession,
   sessionMailbox,
@@ -100,7 +105,11 @@ type SessionPayload =
   | ({ v: 1; type: "image" | "file" } & AttachmentMeta)
   /** 好友托管：请求回传副本 / 回传副本（清单块 CID + 清单密钥，均为密文材料，FR-7.3） */
   | { v: 1; type: "custody-request"; forName: string | null }
-  | { v: 1; type: "custody-reply"; cid: string; contentKey: string; nonce: string };
+  | { v: 1; type: "custody-reply"; cid: string; contentKey: string; nonce: string }
+  /** 社交恢复（FR-1.3）：邀请成为守护者 / 请求回传分片 / 回传分片（设计报告 §4.3） */
+  | { v: 1; type: "guardian-invite"; did: string; wrapCid: string; sealedShare: string }
+  | { v: 1; type: "recovery-request"; did: string }
+  | { v: 1; type: "recovery-share"; did: string; shareX: number; shareY: string };
 
 /** 开放备份包格式（FR-7.2；明文 JSON，导出文件的保管责任在用户，UX-7 披露） */
 interface ExportBundle {
@@ -172,6 +181,9 @@ export class Messaging {
 
   /** 状态变化回调（UI 绑定） */
   onStateChange: () => void = () => {};
+
+  /** 新消息回调（S8 通知：app 层据此在页面隐藏时发系统通知；W2 边界见 M1 计划） */
+  onIncomingMessage: ((message: ChatMessage) => void) | null = null;
 
   private constructor(private deps: MessagingDeps) {}
 
@@ -448,6 +460,155 @@ export class Messaging {
     );
   }
 
+  // ----- 社交恢复（FR-1.3，M1 计划 §2 S7） -----
+
+  /** 我作为守护者持有的分片包：ownerDid → { wrapCid, sealedShare } */
+  async listGuardianships(): Promise<{ ownerDid: string; wrapCid: string }[]> {
+    const out: { ownerDid: string; wrapCid: string }[] = [];
+    for (const key of await this.deps.kv.keys("guardianship:")) {
+      const raw = await this.deps.kv.get(key);
+      if (!raw) continue;
+      const g = JSON.parse(bytesToUtf8(raw)) as { wrapCid: string };
+      out.push({ ownerDid: key.slice("guardianship:".length), wrapCid: g.wrapCid });
+    }
+    return out;
+  }
+
+  /** 待确认的恢复请求（守护者人工确认 = Web of Trust 语义，UX 上明确警示）。 */
+  async listRecoveryRequests(): Promise<{ ownerDid: string; fromDid: string }[]> {
+    const out: { ownerDid: string; fromDid: string }[] = [];
+    for (const key of await this.deps.kv.keys("recovery-request:")) {
+      const raw = await this.deps.kv.get(key);
+      if (!raw) continue;
+      const r = JSON.parse(bytesToUtf8(raw)) as { ownerDid: string; fromDid: string };
+      out.push(r);
+    }
+    return out;
+  }
+
+  /**
+   * 守护者确认恢复请求：解出分片（自己的 IK 私钥）并回传给请求者。
+   * UI 必须醒目提示"确认对方确为本人、你本人未丢失设备"（M1 无自动冷静期，边界见 M1 计划 §2 S7）。
+   */
+  async confirmRecoveryRequest(fromDid: string, ownerDid: string): Promise<void> {
+    const raw = await this.deps.kv.get(`guardianship:${ownerDid}`);
+    if (!raw) throw new Error("你不是该账户的守护者");
+    const g = JSON.parse(bytesToUtf8(raw)) as { wrapCid: string; sealedShare: string };
+    const share = openGuardianShare(this.identity.ikEd.privateKey, {
+      did: ownerDid,
+      wrapCid: g.wrapCid,
+      sealedShare: base58Decode(g.sealedShare),
+    });
+    const session = this.sessions.get(fromDid);
+    if (!session) throw new Error("与请求者的会话不存在");
+    const wire = sessionSend(
+      session,
+      utf8ToBytes(
+        JSON.stringify({
+          v: 1,
+          type: "recovery-share",
+          did: ownerDid,
+          shareX: share.x,
+          shareY: base58Encode(share.y),
+        } satisfies SessionPayload),
+      ),
+    );
+    const mailboxId = sessionMailbox(session, "send", Date.now());
+    await this.deps.api.mailboxAppend(mailboxId, this.seal(wire, mailboxId));
+    await this.deps.kv.delete(`recovery-request:${fromDid}`);
+    this.emit();
+  }
+
+  /** 守护者拒绝恢复请求（UX-2：拒绝入口，防社工）。 */
+  async rejectRecoveryRequest(fromDid: string): Promise<void> {
+    await this.deps.kv.delete(`recovery-request:${fromDid}`);
+    this.emit();
+  }
+
+  /**
+   * 设置紧急联系人（原机）：生成 RK → 身份包裹入 CAS → 公告上节点 → 分片经会话分发。
+   * 守护者接受（guardian-invite 静默存储）后生效；建议选 5 位、门限 3（FR-1.3 默认）。
+   */
+  async setupGuardians(guardianDids: string[], threshold = 3): Promise<{ wrapCid: string }> {
+    if (guardianDids.length < 2) throw new Error("守护者至少 2 位");
+    for (const did of guardianDids) {
+      if (!this.sessions.has(did)) throw new Error("守护者必须是已建立会话的联系人");
+    }
+    const setup = createRecoverySetup(this.identity, guardianDids, threshold);
+    await this.deps.api.putBlock(setup.wrapCid, setup.wrap);
+    await this.deps.api.putRecoveryAnnouncement(this.identity.did, {
+      did: setup.announcement.did,
+      wrapCid: setup.announcement.wrapCid,
+      threshold: setup.announcement.threshold,
+      guardians: setup.announcement.guardians,
+      signature: base58Encode(setup.announcement.signature),
+    });
+
+    for (const did of guardianDids) {
+      const pack = sealGuardianShare(setup, did);
+      const session = this.sessions.get(did)!;
+      const wire = sessionSend(
+        session,
+        utf8ToBytes(
+          JSON.stringify({
+            v: 1,
+            type: "guardian-invite",
+            did: this.identity.did,
+            wrapCid: setup.wrapCid,
+            sealedShare: base58Encode(pack.sealedShare),
+          } satisfies SessionPayload),
+        ),
+      );
+      const mailboxId = sessionMailbox(session, "send", Date.now());
+      await this.deps.api.mailboxAppend(mailboxId, this.seal(wire, mailboxId));
+    }
+    await this.deps.kv.put(
+      "recovery-self",
+      utf8ToBytes(JSON.stringify({ wrapCid: setup.wrapCid, threshold, guardians: guardianDids })),
+    );
+    this.emit();
+    return { wrapCid: setup.wrapCid };
+  }
+
+  async getRecoverySelf(): Promise<{ wrapCid: string; threshold: number; guardians: string[] } | null> {
+    const raw = await this.deps.kv.get("recovery-self");
+    return raw ? (JSON.parse(bytesToUtf8(raw)) as { wrapCid: string; threshold: number; guardians: string[] }) : null;
+  }
+
+  /** 发起恢复请求（新机/临时身份视角）：向守护者请求分片回传。 */
+  async sendRecoveryRequest(ownerDid: string): Promise<void> {
+    for (const [did, session] of this.sessions) {
+      const wire = sessionSend(
+        session,
+        utf8ToBytes(JSON.stringify({ v: 1, type: "recovery-request", did: ownerDid } satisfies SessionPayload)),
+      );
+      const mailboxId = sessionMailbox(session, "send", Date.now());
+      await this.deps.api.mailboxAppend(mailboxId, this.seal(wire, mailboxId));
+      void did;
+    }
+    this.emit();
+  }
+
+  /** 已收集的恢复分片（恢复收集器）。 */
+  collectedShares: { shareX: number; shareY: string; fromDid: string }[] = [];
+
+  /** 恢复完成判定：收集数达门限后重组 RK → 解开身份包裹 → 返回身份 JSON。 */
+  async tryFinishRecovery(
+    ownerDid: string,
+    wrapCid: string,
+    threshold: number,
+  ): Promise<string | null> {
+    if (this.collectedShares.length < threshold) return null;
+    const shares = this.collectedShares.slice(0, threshold).map((s) => ({
+      x: s.shareX,
+      y: base58Decode(s.shareY),
+    }));
+    const rk = recoverRk(shares, 32);
+    const wrapCiphertext = await this.deps.api.getBlock(wrapCid);
+    if (!wrapCiphertext) throw new Error("身份包裹块不存在（节点无此数据）");
+    return openIdentityWrap(rk, wrapCiphertext);
+  }
+
   // ----- 发送（FR-5.1 / FR-5.2 / FR-5.3 子集） -----
 
   async sendMessage(did: string, text: string): Promise<void> {
@@ -636,6 +797,30 @@ export class Messaging {
       );
       return null;
     }
+    if (payload.type === "guardian-invite") {
+      // 成为守护者：静默存储分片包（ECIES 密文，仅我可解）；列表可见（UX-2 "紧急联系人"心智）
+      await this.deps.kv.put(
+        `guardianship:${payload.did}`,
+        utf8ToBytes(JSON.stringify({ wrapCid: payload.wrapCid, sealedShare: payload.sealedShare })),
+      );
+      this.emit();
+      return null;
+    }
+    if (payload.type === "recovery-request") {
+      // 恢复请求：存入待确认队列，由守护者人工判定（M1 无自动冷静期，边界披露见 recovery.ts）
+      await this.deps.kv.put(
+        `recovery-request:${did}`,
+        utf8ToBytes(JSON.stringify({ ownerDid: payload.did, fromDid: did, at: Date.now() })),
+      );
+      this.emit();
+      return null;
+    }
+    if (payload.type === "recovery-share") {
+      // 收到守护者回传的分片（恢复收集器）
+      this.collectedShares.push({ shareX: payload.shareX, shareY: payload.shareY, fromDid: did });
+      this.emit();
+      return null;
+    }
     if (payload.type === "chat") {
       return await this.appendLocalMessage(did, "in", payload.text, "chat");
     }
@@ -789,6 +974,9 @@ export class Messaging {
       ...(direction === "out" && kind !== "handshake" ? { status: "sent" as const } : {}),
     };
     await this.persistMessage(did, message);
+    if (direction === "in" && kind !== "handshake") {
+      this.onIncomingMessage?.(message);
+    }
     this.emit();
     return message;
   }

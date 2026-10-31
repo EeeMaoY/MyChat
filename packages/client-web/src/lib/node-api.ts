@@ -102,6 +102,24 @@ export class NodeApi {
     return new Uint8Array(await res.arrayBuffer());
   }
 
+  // ----- 恢复公告（社交恢复 FR-1.3） -----
+
+  async putRecoveryAnnouncement(did: string, announcement: unknown): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/v0/registry/recovery/${encodeURIComponent(did)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ announcement }),
+    });
+    if (!res.ok) await readError(res);
+  }
+
+  async getRecoveryAnnouncement(did: string): Promise<Record<string, unknown> | null> {
+    const res = await fetch(`${this.baseUrl}/v0/registry/recovery/${encodeURIComponent(did)}`);
+    if (res.status === 404) return null;
+    if (!res.ok) await readError(res);
+    return (await res.json()) as Record<string, unknown>;
+  }
+
   // ----- Storage: 信箱 -----
 
   async mailboxAppend(mailboxId: string, envelope: Envelope): Promise<number> {
