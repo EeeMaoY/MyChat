@@ -14,6 +14,7 @@ import {
   didToEd25519PublicKey,
   decodePreKeyBundle,
   verifyPreKeyBundle,
+  verifyRecoveryAnnouncement,
 } from "@mychat/core";
 import { envelopeFromJson, envelopeToJson, type EnvelopeJson } from "./wire.ts";
 import { RelayHub, type RelayDelivery, type RelayNotification } from "./relay.ts";
@@ -48,6 +49,7 @@ interface NodeState {
   storage: StorageStore;
   registry: RegistryStore;
   bundles: BundleStore;
+  recovery: Map<string, string>;
   ktlog: KTLogStore;
   relay: RelayHub;
 }
@@ -58,6 +60,7 @@ export function startDevNode(opts: { port?: number; host?: string } = {}): Promi
     storage: createStorageStore(),
     registry: createRegistryStore(),
     bundles: createBundleStore(),
+    recovery: new Map(),
     ktlog: createKTLogStore(),
     relay: new RelayHub(),
   };
@@ -168,6 +171,47 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
         if (!stored) return sendError(res, 404, "bundle 不存在");
         res.writeHead(200, { "content-type": "application/octet-stream" });
         res.end(Buffer.from(stored));
+        return;
+      }
+    }
+
+    // ----- 恢复公告（社交恢复 FR-1.3，设计报告 §4.3：节点按 DID 存当前公告）-----
+    if (parts[1] === "registry" && parts[2] === "recovery" && typeof parts[3] === "string") {
+      const did = decodeURIComponent(parts[3]);
+      try {
+        didToEd25519PublicKey(did);
+      } catch {
+        return sendError(res, 400, "DID 格式非法");
+      }
+      if (req.method === "PUT") {
+        const body = await readJson(req);
+        const announcement = body.announcement;
+        if (typeof announcement !== "object" || announcement === null) {
+          return sendError(res, 400, "公告格式非法");
+        }
+        const a = announcement as Record<string, unknown>;
+        if (a.did !== did || typeof a.wrapCid !== "string" || typeof a.threshold !== "number" || !Array.isArray(a.guardians)) {
+          return sendError(res, 400, "公告字段非法");
+        }
+        const parsed = {
+          did: a.did,
+          wrapCid: a.wrapCid,
+          threshold: a.threshold,
+          guardians: a.guardians as string[],
+          signature: new Uint8Array(Buffer.from(String(a.signature ?? ""), "base64")),
+        };
+        // 节点侧验签准入：公告必须由该 DID 的 IK 签名（客户端仍须自主验签）
+        if (!verifyRecoveryAnnouncement(parsed)) {
+          return sendError(res, 400, "公告验签失败");
+        }
+        state.recovery.set(did, JSON.stringify({ ...a }));
+        return sendJson(res, 201, { ok: true });
+      }
+      if (req.method === "GET") {
+        const stored = state.recovery.get(did);
+        if (!stored) return sendError(res, 404, "恢复公告不存在");
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(stored);
         return;
       }
     }
