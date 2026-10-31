@@ -37,6 +37,10 @@ import {
   stripPadding,
   utf8ToBytes,
   bytesToUtf8,
+  base58Encode,
+  base58Decode,
+  decryptAttachment,
+  encryptAttachment,
   verifyPreKeyBundle,
   verifyUserNameRecord,
   EPOCH_MS,
@@ -60,14 +64,40 @@ export interface Contact {
   addedAt: number;
 }
 
+/** 附件元数据（contentKey/nonce 为 base58；整体存放于 E2EE 消息体内，节点不可见） */
+export interface AttachmentMeta {
+  cid: string;
+  contentKey: string;
+  nonce: string;
+  name: string;
+  size: number;
+  mime: string;
+}
+
+export type MessageKind = "handshake" | "chat" | "image" | "file";
+
 export interface ChatMessage {
   id: string;
   did: string;
   direction: "in" | "out";
+  kind: MessageKind;
+  /** chat=文本；image/file=文件名 */
   text: string;
+  /** image/file 时存在 */
+  attachment?: AttachmentMeta;
   at: number;
-  kind: "handshake" | "chat";
+  /** out 消息的回执状态：sent=已投递节点信箱，delivered=对端已拉取，read=对端已读（FR-5.2） */
+  status?: "sent" | "delivered" | "read";
 }
+
+/**
+ * 会话明文载荷（M1 计划 §3.1 结构化约定；wire 格式不变，协议规范 §7 不升版）。
+ * receipt 的 delivered/read 为对端消息 id 列表（批量合并，MR-1）。
+ */
+type SessionPayload =
+  | { v: 1; type: "chat"; text: string }
+  | { v: 1; type: "receipt"; delivered: string[]; read: string[] }
+  | ({ v: 1; type: "image" | "file" } & AttachmentMeta);
 
 export interface MessagingDeps {
   api: NodeApi;
@@ -80,6 +110,7 @@ const K_MY_NAME = "my-name";
 const K_SPK = "spk";
 const K_OPK = "opk";
 const K_MSG_SEQ = "msgseq";
+const SETTING_READ_RECEIPTS = "setting:read-receipts";
 const contactKey = (did: string) => `contact:${did}`;
 const sessionKey = (did: string) => `session:${did}`;
 const msgKey = (did: string, seq: number) => `msg:${did}:${String(seq).padStart(8, "0")}`;
@@ -112,6 +143,10 @@ export class Messaging {
 
   private cursors = new Map<string, number>();
   private msgSeq = 0;
+  /** message.id → kv 键（回执更新重写旧消息时定位原键，避免写错序号） */
+  private messageKeys = new Map<string, string>();
+  /** 已确认发出 read 回执的 in 消息 id（幂等，防重复回执） */
+  private readConfirmed = new Set<string>();
   private stopWs: (() => void) | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -188,7 +223,10 @@ export class Messaging {
     const list: ChatMessage[] = [];
     for (const key of keys) {
       const raw = await this.deps.kv.get(key);
-      if (raw) list.push(JSON.parse(bytesToUtf8(raw)) as ChatMessage);
+      if (!raw) continue;
+      const message = JSON.parse(bytesToUtf8(raw)) as ChatMessage;
+      this.messageKeys.set(message.id, key);
+      list.push(message);
     }
     list.sort((a, b) => a.at - b.at);
     this.messages.set(did, list);
@@ -255,16 +293,56 @@ export class Messaging {
     }
   }
 
-  // ----- 发送（FR-5.1） -----
+  // ----- 发送（FR-5.1 / FR-5.2 / FR-5.3 子集） -----
 
   async sendMessage(did: string, text: string): Promise<void> {
     const session = this.sessions.get(did);
     if (!session) throw new Error("会话不存在（请先添加好友）");
-    const wire = sessionSend(session, utf8ToBytes(text));
+    await this.sendPayload(session, did, { v: 1, type: "chat", text }, "chat", text);
+  }
+
+  /**
+   * 发送图片/文件：随机 CK 加密 → CAS 块 → 消息携带 CID + CK（M1 计划 §3.4）。
+   * 节点只见密文块；CK 仅存在于 E2EE 消息体。
+   */
+  async sendAttachment(
+    did: string,
+    file: { data: Uint8Array; name: string; mime: string },
+    kind: "image" | "file",
+  ): Promise<void> {
+    const session = this.sessions.get(did);
+    if (!session) throw new Error("会话不存在（请先添加好友）");
+    if (file.data.length > 8 * 1024 * 1024) throw new Error("附件超过 8MB 上限");
+
+    const att = encryptAttachment(file.data);
+    await this.deps.api.putBlock(att.cid, att.ciphertext);
+    const payload = {
+      v: 1 as const,
+      type: kind,
+      cid: att.cid,
+      contentKey: base58Encode(att.contentKey),
+      nonce: base58Encode(att.nonce),
+      name: file.name,
+      size: file.data.length,
+      mime: file.mime,
+    };
+    await this.sendPayload(session, did, payload, kind, file.name);
+  }
+
+  private async sendPayload(
+    session: Session,
+    did: string,
+    payload: SessionPayload,
+    kind: MessageKind,
+    text: string,
+  ): Promise<void> {
+    const wire = sessionSend(session, utf8ToBytes(JSON.stringify(payload)));
     const mailboxId = sessionMailbox(session, "send", Date.now());
     const envelope = this.seal(wire, mailboxId);
     await this.deps.api.mailboxAppend(envelope.toPseudonym, envelope);
-    await this.appendLocalMessage(did, "out", text, "chat");
+    if (payload.type !== "receipt") {
+      await this.appendLocalMessage(did, "out", text, kind, payload);
+    }
     this.emit();
   }
 
@@ -351,6 +429,7 @@ export class Messaging {
     const session = this.sessions.get(did);
     if (!session) return;
     const now = Date.now();
+    const deliveredIds: string[] = [];
     for (const at of [now - EPOCH_MS, now, now + EPOCH_MS]) {
       const mailboxId = sessionMailbox(session, "recv", at);
       const cursor = await this.cursorFor(mailboxId);
@@ -359,13 +438,102 @@ export class Messaging {
         try {
           const wire = stripPadding(envelope.payload);
           const plaintext = sessionReceive(session, wire);
-          await this.appendLocalMessage(did, "in", bytesToUtf8(plaintext), "chat");
+          const message = await this.handleSessionPayload(did, bytesToUtf8(plaintext));
+          if (message) deliveredIds.push(message.id);
         } catch {
           // 篡改/重放/跨会话密文：丢弃（SR-4）
         }
       }
       await this.advanceCursor(mailboxId, next);
     }
+    // delivered 回执：本轮拉取到的内容类消息聚合为一条（MR-1）
+    if (deliveredIds.length > 0) {
+      await this.sendReceipt(did, { delivered: deliveredIds, read: [] });
+    }
+  }
+
+  /** 解析会话载荷并落库；返回内容类消息（回执返回 null）。兼容 M0 纯文本消息。 */
+  private async handleSessionPayload(did: string, raw: string): Promise<ChatMessage | null> {
+    let payload: SessionPayload;
+    try {
+      const parsed = JSON.parse(raw) as SessionPayload;
+      if (parsed?.v !== 1 || typeof parsed.type !== "string") throw new Error("bad payload");
+      payload = parsed;
+    } catch {
+      // M0 时期的纯文本消息（协议规范 v0.1 过渡兼容）
+      return await this.appendLocalMessage(did, "in", raw, "chat");
+    }
+
+    if (payload.type === "receipt") {
+      await this.applyReceipt(did, payload);
+      return null;
+    }
+    if (payload.type === "chat") {
+      return await this.appendLocalMessage(did, "in", payload.text, "chat");
+    }
+    // image / file
+    return await this.appendLocalMessage(did, "in", payload.name, payload.type, payload);
+  }
+
+  /** 收到对端回执：升级本地 out 消息状态（read > delivered > sent）。 */
+  private async applyReceipt(did: string, receipt: { delivered: string[]; read: string[] }): Promise<void> {
+    const list = this.messages.get(did) ?? [];
+    let changed = false;
+    for (const message of list) {
+      if (message.direction !== "out") continue;
+      if (receipt.read.includes(message.id) && message.status !== "read") {
+        message.status = "read";
+        changed = true;
+      } else if (receipt.delivered.includes(message.id) && (message.status === "sent" || message.status === undefined)) {
+        message.status = "delivered";
+        changed = true;
+      }
+    }
+    if (changed) {
+      for (const message of list) {
+        if (message.direction === "out") await this.persistMessage(did, message);
+      }
+    }
+  }
+
+  /** 发送回执（E2EE 会话消息；已读回执关闭时 read 列表恒为空，无可分析差异，FR-5.2）。 */
+  private async sendReceipt(did: string, receipt: { delivered: string[]; read: string[] }): Promise<void> {
+    const session = this.sessions.get(did);
+    if (!session) return;
+    if (receipt.delivered.length === 0 && receipt.read.length === 0) return;
+    try {
+      const wire = sessionSend(session, utf8ToBytes(JSON.stringify({ v: 1, type: "receipt", ...receipt } satisfies SessionPayload)));
+      const mailboxId = sessionMailbox(session, "send", Date.now());
+      await this.deps.api.mailboxAppend(mailboxId, this.seal(wire, mailboxId));
+    } catch {
+      /* 回执失败不影响内容消息 */
+    }
+  }
+
+  /**
+   * UI 打开会话时调用：把对方发来的、尚未确认已读的消息聚合发出 read 回执。
+   * 已读回执关闭（FR-5.2 隐私开关）时完全不产生 read 回执。
+   */
+  async markChatOpened(did: string): Promise<void> {
+    if (!(await this.readReceiptsEnabled())) return;
+    const list = this.messages.get(did) ?? [];
+    const readIds = list
+      .filter((m) => m.direction === "in" && m.kind !== "handshake" && !this.readConfirmed.has(m.id))
+      .map((m) => m.id);
+    if (readIds.length === 0) return;
+    for (const id of readIds) this.readConfirmed.add(id);
+    await this.sendReceipt(did, { delivered: [], read: readIds });
+  }
+
+  /** 已读回执开关（默认开启；kv 持久化，UI 设置项）。 */
+  async readReceiptsEnabled(): Promise<boolean> {
+    const raw = await this.deps.kv.get(SETTING_READ_RECEIPTS);
+    return raw === undefined ? true : bytesToUtf8(raw) === "on";
+  }
+
+  async setReadReceiptsEnabled(enabled: boolean): Promise<void> {
+    await this.deps.kv.put(SETTING_READ_RECEIPTS, utf8ToBytes(enabled ? "on" : "off"));
+    this.emit();
   }
 
   // ----- 实时（WS 唤醒 + 轮询兜底，W2 约束） -----
@@ -409,21 +577,56 @@ export class Messaging {
     if (session) await this.deps.kv.put(sessionKey(did), utf8ToBytes(serializeSession(session)));
   }
 
-  private async appendLocalMessage(did: string, direction: "in" | "out", text: string, kind: ChatMessage["kind"]): Promise<void> {
-    this.msgSeq += 1;
+  private async appendLocalMessage(
+    did: string,
+    direction: "in" | "out",
+    text: string,
+    kind: MessageKind,
+    payload?: SessionPayload,
+  ): Promise<ChatMessage> {
+    const attachment: AttachmentMeta | undefined =
+      payload && (payload.type === "image" || payload.type === "file")
+        ? {
+            cid: payload.cid,
+            contentKey: payload.contentKey,
+            nonce: payload.nonce,
+            name: payload.name,
+            size: payload.size,
+            mime: payload.mime,
+          }
+        : undefined;
     const message: ChatMessage = {
       id: `m${this.msgSeq}`,
       did,
       direction,
-      text,
-      at: Date.now(),
       kind,
+      text,
+      ...(attachment ? { attachment } : {}),
+      at: Date.now(),
+      ...(direction === "out" && kind !== "handshake" ? { status: "sent" as const } : {}),
     };
+    await this.persistMessage(did, message);
+    this.emit();
+    return message;
+  }
+
+  private async persistMessage(did: string, message: ChatMessage): Promise<void> {
     const list = this.messages.get(did) ?? [];
-    list.push(message);
+    if (!list.includes(message)) list.push(message);
     this.messages.set(did, list);
-    await this.deps.kv.put(msgKey(did, this.msgSeq), utf8ToBytes(JSON.stringify(message)));
+    let key = this.messageKeys.get(message.id);
+    if (!key) {
+      this.msgSeq += 1;
+      key = msgKey(did, this.msgSeq);
+      this.messageKeys.set(message.id, key);
+    }
+    await this.deps.kv.put(key, utf8ToBytes(JSON.stringify(message)));
     await this.deps.kv.put(K_MSG_SEQ, utf8ToBytes(String(this.msgSeq)));
+  }
+
+  /** UI 层取附件块的最小访问面（deps 保持私有）。 */
+  getNodeApi(): NodeApi {
+    return this.deps.api;
   }
 
   private emit(): void {

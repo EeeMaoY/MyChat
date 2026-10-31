@@ -130,6 +130,24 @@ export class NodeApi {
     return { envelopes: body.envelopes.map(envelopeFromJson), cursor: body.cursor };
   }
 
+  // ----- Storage: 块（附件/托管副本走 CAS，节点只见密文） -----
+
+  async putBlock(cid: string, data: Uint8Array): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/v0/storage/blocks/${encodeURIComponent(cid)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/octet-stream" },
+      body: new Uint8Array(data),
+    });
+    if (!res.ok) await readError(res);
+  }
+
+  async getBlock(cid: string): Promise<Uint8Array | null> {
+    const res = await fetch(`${this.baseUrl}/v0/storage/blocks/${encodeURIComponent(cid)}`);
+    if (res.status === 404) return null;
+    if (!res.ok) await readError(res);
+    return new Uint8Array(await res.arrayBuffer());
+  }
+
   // ----- Relay: WS 唤醒订阅 -----
 
   /**

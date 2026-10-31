@@ -7,7 +7,7 @@
  */
 import { useSyncExternalStore } from "react";
 
-import { createIdbKVStore, type KVStore } from "@mychat/core";
+import { base58Decode, createIdbKVStore, decryptAttachment, type KVStore } from "@mychat/core";
 
 import { Messaging, type ChatMessage, type Contact } from "./messaging";
 import { NodeApi } from "./node-api";
@@ -131,6 +131,43 @@ export async function addFriend(name: string, note: string): Promise<string | nu
 
 export async function sendMessage(did: string, text: string): Promise<void> {
   await messaging?.sendMessage(did, text);
+}
+
+/** 发送图片/文件（≤8MB，端到端加密后走 CAS 块）。 */
+export async function sendAttachment(
+  did: string,
+  file: { data: Uint8Array; name: string; mime: string },
+  kind: "image" | "file",
+): Promise<void> {
+  await messaging?.sendAttachment(did, file, kind);
+}
+
+/** UI 打开会话时调用：触发对端的 read 回执（受隐私开关控制）。 */
+export function markChatOpened(did: string): void {
+  void messaging?.markChatOpened(did);
+}
+
+export async function getReadReceiptsEnabled(): Promise<boolean> {
+  return (await messaging?.readReceiptsEnabled()) ?? true;
+}
+
+export async function setReadReceiptsEnabled(enabled: boolean): Promise<void> {
+  await messaging?.setReadReceiptsEnabled(enabled);
+}
+
+/** 取回并解密附件（图片渲染/文件下载用；objectURL 缓存由 UI 层管理）。 */
+export async function fetchAttachment(
+  meta: { cid: string; contentKey: string; nonce: string },
+): Promise<Uint8Array> {
+  const m = messaging;
+  if (!m) throw new Error("应用尚未就绪");
+  const ciphertext = await m.getNodeApi().getBlock(meta.cid);
+  if (!ciphertext) throw new Error("附件块不存在（节点无此数据）");
+  return decryptAttachment({
+    ciphertext,
+    contentKey: base58Decode(meta.contentKey),
+    nonce: base58Decode(meta.nonce),
+  });
 }
 
 export function openChat(did: string | null): void {
