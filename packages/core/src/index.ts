@@ -23,3 +23,5 @@ export * from "./signal/index.ts";
 export * from "./envelope/index.ts";
 export * from "./store/index.ts";
 export * from "./attachment/index.ts";
+export * from "./ssss/index.ts";
+export * from "./ktmerkle/index.ts";
