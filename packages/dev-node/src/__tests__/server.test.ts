@@ -6,7 +6,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { WebSocket } from "ws";
 
 import type { Envelope } from "@mychat/core";
-import { AEAD_NONCE_LENGTH, createIdentity, makeUserNameRecord, randomBytes } from "@mychat/core";
+import {
+  AEAD_NONCE_LENGTH,
+  createIdentity,
+  decodePreKeyBundle,
+  deriveOpkId,
+  encodePreKeyBundle,
+  generateX25519KeyPair,
+  issuePreKeyBundle,
+  makeUserNameRecord,
+  randomBytes,
+} from "@mychat/core";
 
 import { startDevNode, type DevNode } from "../server";
 import { envelopeToJson } from "../wire";
@@ -56,6 +66,42 @@ describe("Registry（验签 + 重名拒绝 + KT 联动）", () => {
     expect(got.name).toBe("alice");
     expect(got.did).toBe(identity.did);
     expect(Buffer.from(got.signature, "base64")).toEqual(Buffer.from(record.signature));
+  });
+
+  it("bundle 分发：有效上传 201 / 查回一致 / 篡改与坏 DID 被拒 / 缺失 404", async () => {
+    const { identity } = await registerUser("bundleuser");
+    const spk = generateX25519KeyPair();
+    const opk = generateX25519KeyPair();
+    const bundle = issuePreKeyBundle(identity, spk, { ...opk, id: deriveOpkId(opk.publicKey) }, 3_600_000);
+    const encoded = encodePreKeyBundle(bundle);
+    void decodePreKeyBundle; // 保持导入面一致（解码校验在节点内完成）
+
+    const put = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(identity.did)}`, {
+      method: "PUT",
+      body: Buffer.from(encoded),
+    });
+    expect(put.status).toBe(201);
+
+    const get = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(identity.did)}`);
+    expect(new Uint8Array(await get.arrayBuffer())).toEqual(encoded);
+
+    // 篡改一个字节 → 节点验签拒绝
+    const tampered = encoded.slice();
+    tampered[40]! ^= 1;
+    const putBad = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(identity.did)}`, {
+      method: "PUT",
+      body: Buffer.from(tampered),
+    });
+    expect(putBad.status).toBe(400);
+
+    // DID 格式非法
+    const putBadDid = await fetch(`${base}/v0/registry/bundle/not-a-did`, { method: "PUT", body: Buffer.from(encoded) });
+    expect(putBadDid.status).toBe(400);
+
+    // 未上传 bundle 的合法格式 DID（格式非法才是 400）
+    const stranger = createIdentity();
+    const missing = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(stranger.did)}`);
+    expect(missing.status).toBe(404);
   });
 
   it("重名注册被拒（409）", async () => {

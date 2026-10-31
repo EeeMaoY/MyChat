@@ -39,3 +39,23 @@ export function registerRecord(store: RegistryStore, record: UserNameRecord): { 
 export function resolveName(store: RegistryStore, name: string): UserNameRecord | undefined {
   return store.records.get(name);
 }
+
+/**
+ * 预密钥束分发表（Registry 角色的 M0 扩展，设计报告 §5.2）：
+ * bundle 经节点验签后按 DID 存取——"任何人可读的公开身份材料"。
+ * 存储键为 DID（每用户当前 bundle），bundle 轮换与历史版本为 M1。
+ */
+export interface BundleStore {
+  bundles: Map<string, Uint8Array>;
+}
+
+export function createBundleStore(): BundleStore {
+  return { bundles: new Map() };
+}
+
+export function putBundle(store: BundleStore, did: string, bundle: Uint8Array): void {
+  // CID 语义留给客户端校验；节点只做定长防护（编码 251B v1，留余量）
+  if (bundle.length === 0 || bundle.length > 1024) throw new Error("bundle 长度非法");
+  store.bundles.set(did, bundle);
+}
+

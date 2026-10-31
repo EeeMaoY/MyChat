@@ -7,7 +7,7 @@
  *
  * 注意：内存态，无持久化——开发/演示环境属性，生产多节点部署为后续里程碑。
  */
-import { startDevNode } from "./server";
+import { startDevNode } from "./server.ts";
 
 const port = Number(process.env.MYCHAT_PORT ?? "8629");
 const host = process.env.MYCHAT_HOST ?? "127.0.0.1";

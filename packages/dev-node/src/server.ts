@@ -10,10 +10,23 @@ import type { AddressInfo } from "node:net";
 import { WebSocketServer, type WebSocket } from "ws";
 
 import type { KTEvent, UserNameRecord } from "@mychat/core";
-import { envelopeFromJson, envelopeToJson, type EnvelopeJson } from "./wire";
-import { RelayHub, type RelayDelivery, type RelayNotification } from "./relay";
-import { appendEvent, createKTLogStore, listEvents, type KTLogStore } from "./ktlog";
-import { createRegistryStore, registerRecord, resolveName, type RegistryStore } from "./registry";
+import {
+  didToEd25519PublicKey,
+  decodePreKeyBundle,
+  verifyPreKeyBundle,
+} from "@mychat/core";
+import { envelopeFromJson, envelopeToJson, type EnvelopeJson } from "./wire.ts";
+import { RelayHub, type RelayDelivery, type RelayNotification } from "./relay.ts";
+import { appendEvent, createKTLogStore, listEvents, type KTLogStore } from "./ktlog.ts";
+import {
+  createBundleStore,
+  createRegistryStore,
+  putBundle,
+  registerRecord,
+  resolveName,
+  type BundleStore,
+  type RegistryStore,
+} from "./registry.ts";
 import {
   createStorageStore,
   getBlock,
@@ -21,7 +34,7 @@ import {
   mailboxFetch,
   putBlock,
   type StorageStore,
-} from "./storage";
+} from "./storage.ts";
 
 const MAX_BODY = 16 * 1024 * 1024; // 块大小上限 16MB
 const MAILBOX_MAX_ENTRIES = 1000;
@@ -34,6 +47,7 @@ export interface DevNode {
 interface NodeState {
   storage: StorageStore;
   registry: RegistryStore;
+  bundles: BundleStore;
   ktlog: KTLogStore;
   relay: RelayHub;
 }
@@ -43,6 +57,7 @@ export function startDevNode(opts: { port?: number; host?: string } = {}): Promi
   const state: NodeState = {
     storage: createStorageStore(),
     registry: createRegistryStore(),
+    bundles: createBundleStore(),
     ktlog: createKTLogStore(),
     relay: new RelayHub(),
   };
@@ -112,6 +127,39 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
       const record = resolveName(state.registry, decodeURIComponent(parts[3]));
       if (!record) return sendError(res, 404, "用户名不存在");
       return sendJson(res, 200, { record: serializeRecord(record) });
+    }
+
+    // ----- 预密钥束分发（Registry 角色扩展，设计报告 §5.2）-----
+    if (parts[1] === "registry" && parts[2] === "bundle" && typeof parts[3] === "string") {
+      const did = decodeURIComponent(parts[3]);
+      // DID 格式校验（防任意键污染）
+      try {
+        didToEd25519PublicKey(did);
+      } catch {
+        return sendError(res, 400, "DID 格式非法");
+      }
+      if (req.method === "PUT") {
+        const body = await readBody(req);
+        // 节点侧验签准入：签名/有效期/DID 一致性不过即拒（客户端仍须自主验签）
+        let bundle;
+        try {
+          bundle = decodePreKeyBundle(new Uint8Array(body));
+        } catch {
+          return sendError(res, 400, "bundle 编码非法");
+        }
+        if (bundle.did !== did || !verifyPreKeyBundle(bundle)) {
+          return sendError(res, 400, "bundle 验签失败或 DID 不匹配");
+        }
+        putBundle(state.bundles, did, new Uint8Array(body));
+        return sendJson(res, 201, { ok: true });
+      }
+      if (req.method === "GET") {
+        const stored = state.bundles.bundles.get(did);
+        if (!stored) return sendError(res, 404, "bundle 不存在");
+        res.writeHead(200, { "content-type": "application/octet-stream" });
+        res.end(Buffer.from(stored));
+        return;
+      }
     }
 
     // ----- KT Log -----
