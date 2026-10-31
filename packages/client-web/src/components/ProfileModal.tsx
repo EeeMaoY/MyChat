@@ -1,7 +1,7 @@
-/** "我"弹窗：用户名/DID 管理、数据与边界诚实披露（UX-6/UX-7）、节点连接设置。 */
-import { useState, type FormEvent } from "react";
+/** "我"弹窗：用户名/DID 管理、已读回执开关、数据与边界诚实披露（UX-6/UX-7）、节点连接设置。 */
+import { useEffect, useState, type ChangeEvent, type FormEvent } from "react";
 
-import { setNotice, submitUsername, useAppState } from "../lib/app";
+import { getReadReceiptsEnabled, setNotice, setReadReceiptsEnabled, submitUsername, useAppState } from "../lib/app";
 
 import { NAME_RE } from "./format";
 import Modal from "./Modal";
@@ -22,6 +22,32 @@ export default function ProfileModal({ onClose }: Props) {
 
   const [nodeUrl, setNodeUrl] = useState<string>(() => localStorage.getItem(NODE_URL_KEY) ?? "");
   const [didCopied, setDidCopied] = useState(false);
+
+  /** 已读回执开关初始值（异步读取，null=加载中）。 */
+  const [readReceipts, setReadReceipts] = useState<boolean | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    void getReadReceiptsEnabled().then((enabled) => {
+      if (alive) setReadReceipts(enabled);
+    });
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  /** 切换已读回执：UI 先行，写库失败则回滚。 */
+  async function handleToggleReadReceipts(e: ChangeEvent<HTMLInputElement>): Promise<void> {
+    const prev = readReceipts === true;
+    const next = e.target.checked;
+    setReadReceipts(next);
+    try {
+      await setReadReceiptsEnabled(next);
+    } catch {
+      setReadReceipts(prev);
+      setNotice("设置保存失败");
+    }
+  }
 
   async function handleSetName(e: FormEvent): Promise<void> {
     e.preventDefault();
@@ -106,6 +132,17 @@ export default function ProfileModal({ onClose }: Props) {
           {didCopied ? "已复制" : "复制"}
         </button>
       </div>
+
+      {/* 已读回执隐私开关（FR-5.2），立即生效 */}
+      <label className="setting-row">
+        <input
+          type="checkbox"
+          checked={readReceipts === true}
+          disabled={readReceipts === null}
+          onChange={(e) => void handleToggleReadReceipts(e)}
+        />
+        已读回执（对方能看到你是否已读）
+      </label>
 
       {/* 能力边界诚实披露（UX-7） */}
       <details className="disclosure">

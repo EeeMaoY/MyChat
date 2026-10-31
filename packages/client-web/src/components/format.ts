@@ -30,6 +30,13 @@ export function truncate(text: string, max: number): string {
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 
+/** 人类可读大小：B / KB / MB（KB 起保留一位小数）。 */
+export function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 /** 短 DID：保留可读前缀 + 主体前几位（did:mychat: 共 11 字符）。 */
 export function shortDid(did: string): string {
   return did.length > 18 ? `${did.slice(0, 18)}…` : did;

@@ -591,10 +591,124 @@ textarea {
   white-space: pre-wrap;
 }
 
-.msg-time {
-  color: var(--text-dim);
-  font-size: 0.7rem;
+.msg-meta {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
   margin-top: 2px;
+}
+
+.msg-meta .msg-time {
+  margin-top: 0;
+}
+
+/* 回执三态（仅 out 消息）：灰勾 / 蓝双勾 */
+.msg-receipt {
+  display: inline-flex;
+  align-items: center;
+  color: var(--text-dim);
+  flex: none;
+}
+
+.msg-receipt.read {
+  color: var(--primary);
+}
+
+/* 附件气泡（图片/文件共用的窄边距容器） */
+.media-bubble {
+  padding: 4px;
+}
+
+/* 图片：气泡内限宽限高，点击新标签页看原图 */
+.msg-image {
+  display: block;
+  max-width: 280px;
+  max-height: 280px;
+  border-radius: 8px;
+  cursor: zoom-in;
+}
+
+/* 图片加载中： shimmer 骨架占位 */
+.img-skeleton {
+  width: 240px;
+  height: 160px;
+  border-radius: 8px;
+  background: linear-gradient(100deg, #1e2530 40%, #2a3444 50%, #1e2530 60%);
+  background-size: 200% 100%;
+  animation: img-shimmer 1.2s ease infinite;
+}
+
+@keyframes img-shimmer {
+  to {
+    background-position: -200% 0;
+  }
+}
+
+/* 图片解密/取块失败占位 */
+.img-failed {
+  color: var(--text-dim);
+  font-size: 0.85rem;
+  text-align: center;
+  padding: 18px 20px;
+  min-width: 160px;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.18);
+}
+
+/* 文件气泡：图标 + 名称 + 大小 + 下载 */
+.file-bubble {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 200px;
+  padding: 2px 4px;
+}
+
+.file-icon {
+  font-size: 1.6rem;
+  flex: none;
+}
+
+.file-info {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  flex: 1;
+}
+
+.file-name {
+  font-weight: 600;
+  font-size: 0.9rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.file-size {
+  font-size: 0.78rem;
+  color: rgba(255, 255, 255, 0.75);
+}
+
+.file-download {
+  flex: none;
+  background: rgba(255, 255, 255, 0.14);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+  border-radius: 8px;
+  color: #fff;
+  font-size: 0.8rem;
+  padding: 5px 12px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.file-download:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.24);
+}
+
+.file-download:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 /* 握手等系统消息：居中细条 */
@@ -669,6 +783,33 @@ textarea {
 
 .chat-textarea:disabled {
   opacity: 0.6;
+}
+
+/* 附件入口（📎）：隐藏文件选择框 + 触发按钮 */
+.chat-file-input {
+  display: none;
+}
+
+.chat-attach {
+  flex: none;
+  height: 42px;
+  padding: 0 12px;
+  background: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  font-size: 1.15rem;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.chat-attach:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.chat-attach:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .chat-send {
@@ -765,6 +906,30 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* 已读回执等设置行（原生 checkbox + label） */
+.setting-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 18px;
+  font-size: 0.88rem;
+  cursor: pointer;
+  color: var(--text);
+}
+
+.setting-row input[type="checkbox"] {
+  width: 16px;
+  height: 16px;
+  accent-color: var(--primary);
+  cursor: pointer;
+  flex: none;
+}
+
+.setting-row input[type="checkbox"]:disabled {
+  cursor: wait;
+  opacity: 0.6;
 }
 
 .disclosure {
