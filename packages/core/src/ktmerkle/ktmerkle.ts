@@ -99,3 +99,35 @@ export function ktVerifyInclusion(event: KTEvent, proof: KtInclusionProof, expec
   }
   return base58Encode(current) === expectedRoot && base58Encode(current) === proof.root;
 }
+
+// ---------------------------------------------------------------------------
+// 前缀一致性验证（SR-5 完整化，M3-S11 捎带）
+//
+// 边界（如实披露）：本树的 pad-to-2^k 形态与 RFC 6962 的 left-aligned 不同，
+// 标准一致性证明需迁移树结构（协议 v0.2 评估）；此处提供**语义等价**的前缀
+// 一致性——节点给出两个时点间的叶哈希增量，客户端重算两个时点的根并与本地
+// 记录（或另一副本的根链）比对。任何历史篡改/分叉都会导致根不匹配，安全语义
+// 与 RFC 6962 一致性证明相同；开销 O(n) 与客户端事件流折叠同阶。
+// ---------------------------------------------------------------------------
+
+/** 树从 size(oldPrefix) 增长到 size(oldPrefix)+appended 的一致性材料（两时点根）。 */
+export function ktConsistencyUpdate(oldPrefixLeafHashes: Uint8Array[], appendedLeafHashes: Uint8Array[]): { oldRoot: string; newRoot: string } {
+  if (oldPrefixLeafHashes.length === 0 && appendedLeafHashes.length === 0) throw new Error("空叶子集");
+  return {
+    oldRoot: oldPrefixLeafHashes.length === 0 ? "" : ktMerkleRoot(oldPrefixLeafHashes),
+    newRoot: ktMerkleRoot([...oldPrefixLeafHashes, ...appendedLeafHashes]),
+  };
+}
+
+/**
+ * 验证前缀一致性：旧前缀叶哈希重算根必须等于 oldRoot，
+ * 追加增量后重算根必须等于 newRoot。任一不匹配 = 节点历史被篡改或副本分叉。
+ */
+export function ktVerifyConsistency(oldPrefixLeafHashes: Uint8Array[], appendedLeafHashes: Uint8Array[], oldRoot: string, newRoot: string): boolean {
+  try {
+    const computed = ktConsistencyUpdate(oldPrefixLeafHashes, appendedLeafHashes);
+    return computed.oldRoot === oldRoot && computed.newRoot === newRoot;
+  } catch {
+    return false;
+  }
+}
