@@ -15,18 +15,28 @@ import {
   decodeSessionWire,
   type Envelope,
   type Identity,
+  type KTEvent,
   type KVStore,
   type KeyPair,
   type PreKeyBundle,
   type Session,
   createRecoverySetup,
+  decodeDeviceCertificateJson,
   deriveOpkId,
   deserializeIdentity,
   deserializeSession,
+  encodeDeviceCertificateJson,
+  encodeDeviceRevocationJson,
   encodePreKeyBundle,
+  fingerprintDeviceIds,
+  activeDeviceIds,
+  foldDeviceEvents,
+  generateEd25519KeyPair,
   generateX25519KeyPair,
   initiateSession,
   issuePreKeyBundle,
+  makeDeviceCertificate,
+  makeDeviceRevocation,
   makeEnvelope,
   makeUserNameRecord,
   openGuardianShare,
@@ -46,8 +56,11 @@ import {
   base58Decode,
   decryptAttachment,
   encryptAttachment,
+  verifyDeviceCertificate,
   verifyPreKeyBundle,
   verifyUserNameRecord,
+  type DeviceCertificate,
+  type DeviceView,
   EPOCH_MS,
 } from "@mychat/core";
 
@@ -140,12 +153,20 @@ const K_SPK = "spk";
 const K_OPK = "opk";
 const K_OPK_POOL = "opk-pool";
 const K_MSG_SEQ = "msgseq";
+const K_DEVICE_DK = "device-dk";
+const K_DEVICE_CERT = "device-cert";
 const SETTING_READ_RECEIPTS = "setting:read-receipts";
 /** OPK 池目标规模与低水位（M2 计划 §3.1：低于水位自动补充）。 */
 export const OPK_POOL_TARGET = 20;
 export const OPK_POOL_LOW = 5;
+/** 设备凭证有效期与提前续期窗口（M2-S10：默认 90 天，临期 7 天内自动续签）。 */
+export const DEVICE_CERT_TTL = 90 * 24 * 3600_000;
+const DEVICE_RENEW_AHEAD = 7 * 24 * 3600_000;
+/** 对端设备集核对节流：发送路径每联系人至多每 60s 拉一次 KT 事件流。 */
+const DEVICE_CHECK_INTERVAL = 60_000;
 const contactKey = (did: string) => `contact:${did}`;
 const sessionKey = (did: string) => `session:${did}`;
+const deviceFpKey = (did: string) => `device-fp:${did}`;
 const msgKey = (did: string, seq: number) => `msg:${did}:${String(seq).padStart(8, "0")}`;
 const cursorKey = (mailboxId: string) => `cursor:${mailboxId}`;
 
@@ -167,6 +188,9 @@ export class Messaging {
   spk!: KeyPair;
   opk!: KeyPair & { id: number };
   myName: string | null = null;
+  /** 本机设备（M2-S10）：DK-ed 签名密钥与 IK 签发的设备凭证 */
+  dkEd!: KeyPair;
+  deviceCert!: DeviceCertificate;
 
   /** did → 会话/联系人/消息（内存态；持久化镜像于 kv） */
   sessions = new Map<string, Session>();
@@ -186,6 +210,8 @@ export class Messaging {
   private readConfirmed = new Set<string>();
   private stopWs: (() => void) | null = null;
   private pollTimer: ReturnType<typeof setInterval> | null = null;
+  /** 对端设备集核对的上次时间（发送路径节流，M2-S10） */
+  private deviceCheckAt = new Map<string, number>();
 
   /** 状态变化回调（UI 绑定） */
   onStateChange: () => void = () => {};
@@ -203,6 +229,7 @@ export class Messaging {
     m.identity = deserializeIdentity(bytesToUtf8(identityJson));
     await m.loadKeyMaterial();
     await m.loadSocialState();
+    await m.ensureDevice();
     return m;
   }
 
@@ -223,7 +250,114 @@ export class Messaging {
     await deps.kv.put(K_SPK, utf8ToBytes(JSON.stringify(kpToJson(m.spk))));
     await deps.kv.put(K_OPK, utf8ToBytes(JSON.stringify({ id: m.opk.id, ...kpToJson(opk) })));
     await m.persistOpkPool();
+    await m.ensureDevice();
     return m;
+  }
+
+  // ----- 本机设备（M2-S10 FR-1.4） -----
+
+  /** 本机设备标识（设备凭证中的 dkId）。 */
+  get deviceDkId(): string {
+    return this.deviceCert.dkId;
+  }
+
+  /**
+   * 确保本机设备凭证可用：dk 不存在则生成；凭证缺失/临期（<7 天）则重签；
+   * 并向节点登记（网络失败不致命，下次启动重试——bundle 上传前置条件，见 setUsername）。
+   */
+  async ensureDevice(): Promise<void> {
+    const dkRaw = await this.deps.kv.get(K_DEVICE_DK);
+    if (dkRaw) {
+      this.dkEd = kpFromJson(JSON.parse(bytesToUtf8(dkRaw)) as StoredKeyPair);
+    } else {
+      this.dkEd = generateEd25519KeyPair();
+      await this.deps.kv.put(K_DEVICE_DK, utf8ToBytes(JSON.stringify(kpToJson(this.dkEd))));
+    }
+
+    let cert: DeviceCertificate | null = null;
+    const certRaw = await this.deps.kv.get(K_DEVICE_CERT);
+    if (certRaw) {
+      try {
+        const parsed = decodeDeviceCertificateJson(bytesToUtf8(certRaw));
+        // 复用条件：凭证属当前 dk、验签通过、未临期
+        if (parsed.dkId === base58Encode(this.dkEd.publicKey) && verifyDeviceCertificate(parsed)) {
+          cert = parsed;
+        }
+      } catch {
+        cert = null;
+      }
+    }
+    if (!cert || cert.expiresAt < Date.now() + DEVICE_RENEW_AHEAD) {
+      cert = makeDeviceCertificate(
+        this.identity.ikEd.privateKey,
+        this.identity.did,
+        this.dkEd.publicKey,
+        this.deriveDeviceLabel(),
+        DEVICE_CERT_TTL,
+      );
+      await this.deps.kv.put(K_DEVICE_CERT, utf8ToBytes(encodeDeviceCertificateJson(cert)));
+    }
+    this.deviceCert = cert;
+
+    try {
+      await this.deps.api.putDevice(this.identity.did, JSON.parse(encodeDeviceCertificateJson(cert)));
+    } catch {
+      /* 节点不可达：登记延后（凭证已持久化，bundle 上传前会重试） */
+    }
+  }
+
+  /** 设备描述（注册时一次生成；从 UA 提取浏览器与平台的可读摘要）。 */
+  private deriveDeviceLabel(): string {
+    const ua = navigator.userAgent;
+    const browser = /Edg\//.test(ua)
+      ? "Edge"
+      : /Firefox\//.test(ua)
+        ? "Firefox"
+        : /Chrome\//.test(ua)
+          ? "Chrome"
+          : /Safari\//.test(ua)
+            ? "Safari"
+            : "浏览器";
+    const platform = /Windows/.test(ua)
+      ? "Windows"
+      : /Mac OS/.test(ua)
+        ? "macOS"
+        : /Android/.test(ua)
+          ? "Android"
+          : /iPhone|iPad/.test(ua)
+            ? "iOS"
+            : /Linux/.test(ua)
+              ? "Linux"
+              : "未知系统";
+    return `${platform} · ${browser}`;
+  }
+
+  /** 我名下的设备列表（KT 事件流本地折叠 + 逐事件验签，SR-5：不采信节点视图）。 */
+  async listMyDevices(): Promise<DeviceView[]> {
+    return (await this.fetchDeviceFold(this.identity.did)).devices;
+  }
+
+  /** 吊销我名下的一台设备（IK 签名吊销声明；节点停发其预密钥材料 + KT 锚定）。 */
+  async revokeMyDevice(dkId: string): Promise<void> {
+    const revocation = makeDeviceRevocation(this.identity.ikEd.privateKey, this.identity.did, dkId);
+    await this.deps.api.revokeDevice(
+      this.identity.did,
+      dkId,
+      JSON.parse(encodeDeviceRevocationJson(revocation)) as Record<string, unknown>,
+    );
+    this.emit();
+  }
+
+  /** 拉取 DID 的 KT 事件流并本地折叠为设备状态（发送路径核对与设备管理共用）。 */
+  private async fetchDeviceFold(did: string): Promise<ReturnType<typeof foldDeviceEvents>> {
+    const raw = await this.deps.api.getKtEvents(did);
+    const events: KTEvent[] = raw.map((e) => ({
+      did: e.did,
+      type: e.type as KTEvent["type"],
+      index: e.index,
+      payload: fromBase64(e.payload),
+    }));
+    return foldDeviceEvents(events);
   }
 
   /** 持久化本地 OPK 池。 */
@@ -237,6 +371,7 @@ export class Messaging {
     await this.deps.api.addOpks(
       this.identity.did,
       [...this.opkPool.entries()].map(([id, kp]) => ({ id, public: base58Encode(kp.publicKey) })),
+      this.deviceDkId,
     );
   }
 
@@ -252,7 +387,7 @@ export class Messaging {
       batch.push({ id, public: base58Encode(k.publicKey) });
     }
     await this.persistOpkPool();
-    await this.deps.api.addOpks(this.identity.did, batch);
+    await this.deps.api.addOpks(this.identity.did, batch, this.deviceDkId);
   }
 
   /** 与 identity/bundle 的 opkId 契约保持一致（见 deriveOpkId）。 */
@@ -321,11 +456,13 @@ export class Messaging {
   async setUsername(name: string): Promise<void> {
     const record = makeUserNameRecord(this.identity.ikEd.privateKey, name, this.identity.did, 0);
     await this.deps.api.register(record);
+    // 设备登记重试（M2-S10：bundle 上传的前置；ensureDevice 失败过的话此处补挂靠）
+    await this.ensureDevice();
     // bundle：以 core 权威实现重派生 opkId（防本地持久化被篡改后不一致）
     this.opk.id = deriveOpkId(this.opk.publicKey);
     const bundle = this.issueBundle();
-    await this.deps.api.putBundle(this.identity.did, encodePreKeyBundle(bundle));
-    await this.uploadOpkPool(); // M2-S9：其余池成员一并登记
+    await this.deps.api.putBundle(this.identity.did, encodePreKeyBundle(bundle), this.deviceDkId);
+    await this.uploadOpkPool(); // M2-S9：其余池成员一并登记（挂靠本机设备槽位）
     this.myName = name;
     await this.deps.kv.put(K_MY_NAME, utf8ToBytes(name));
     this.emit();
@@ -450,6 +587,8 @@ export class Messaging {
     for (const m of bundle.messages) {
       for (const item of m.items) await this.persistMessage(m.did, item);
     }
+    // 导入环境视为一台新设备：重新生成 DK 并登记凭证（M2-S10）
+    await this.ensureDevice();
     this.startRealtime();
     void this.poll();
     this.emit();
@@ -716,6 +855,7 @@ export class Messaging {
   // ----- 发送（FR-5.1 / FR-5.2 / FR-5.3 子集） -----
 
   async sendMessage(did: string, text: string): Promise<void> {
+    await this.ensureSessionFresh(did); // M2-S10：对方设备集变化时先轮换会话
     const session = this.sessions.get(did);
     if (!session) throw new Error("会话不存在（请先添加好友）");
     await this.sendPayload(session, did, { v: 1, type: "chat", text }, "chat", text);
@@ -730,6 +870,7 @@ export class Messaging {
     file: { data: Uint8Array; name: string; mime: string },
     kind: "image" | "file",
   ): Promise<void> {
+    await this.ensureSessionFresh(did);
     const session = this.sessions.get(did);
     if (!session) throw new Error("会话不存在（请先添加好友）");
     if (file.data.length > 8 * 1024 * 1024) throw new Error("附件超过 8MB 上限");
@@ -764,6 +905,55 @@ export class Messaging {
       await this.appendLocalMessage(did, "out", text, kind, payload);
     }
     this.emit();
+  }
+
+  /**
+   * 对端设备集新鲜度核对（M2-S10，吊销后对端密钥轮换的触发器）：
+   * 发送路径节流（每联系人 60s）拉取对方 KT 事件流 → 本地折叠有效设备集 →
+   * 与会话建立时的指纹比对；不一致即重握手轮换（S9 会话替换语义，对端收到提示）。
+   * 节点不可达时不阻塞发送（旧会话仍可用）。
+   */
+  private async ensureSessionFresh(did: string): Promise<void> {
+    const now = Date.now();
+    if (now - (this.deviceCheckAt.get(did) ?? 0) < DEVICE_CHECK_INTERVAL) return;
+    this.deviceCheckAt.set(did, now);
+    let fingerprint: string;
+    try {
+      fingerprint = fingerprintDeviceIds(activeDeviceIds(await this.fetchDeviceFold(did)));
+    } catch {
+      return;
+    }
+    const stored = await this.deps.kv.get(deviceFpKey(did));
+    await this.deps.kv.put(deviceFpKey(did), utf8ToBytes(fingerprint));
+    // 首次记录（stored=undefined）只建档不轮换；变化才轮换
+    if (stored !== undefined && bytesToUtf8(stored) !== fingerprint) {
+      await this.rotateSession(did);
+    }
+  }
+
+  /** 对端设备集变化：取对方当前有效设备的 bundle 重新握手（S9 替换语义），UI 提示轮换。 */
+  private async rotateSession(did: string): Promise<void> {
+    try {
+      const bundleBytes = await this.deps.api.getBundle(did);
+      if (!bundleBytes) return; // 对端暂无有效设备（全部吊销/过期）：保持旧会话
+      const bundle = decodePreKeyBundle(bundleBytes);
+      if (bundle.did !== did || !verifyPreKeyBundle(bundle)) return;
+      const handshake: HandshakePayload = {
+        v: 1,
+        fromDid: this.identity.did,
+        fromName: this.myName,
+        note: "检测到你的设备状态变化，我已轮换会话密钥（自动重建，历史消息保留）",
+      };
+      const { session, wire } = initiateSession(this.identity, bundle, utf8ToBytes(JSON.stringify(handshake)));
+      const envelope = this.seal(wire, discoveryInboxId(did));
+      await this.deps.api.mailboxAppend(envelope.toPseudonym, envelope);
+      this.sessions.set(did, session);
+      await this.saveSession(did);
+      this.onSessionRebuilt?.(did);
+      this.restartRealtime();
+    } catch {
+      /* 轮换失败不阻塞发送（旧会话仍可用，下次核对再试） */
+    }
   }
 
   /** 装信封：内层 wire → 填充（档位自适应）→ 信封（伪地址，FR-3.1/3.3）。 */
@@ -836,7 +1026,7 @@ export class Messaging {
       const usedOpkId = msg.x3dh.opkId;
       if (this.opkPool.delete(usedOpkId)) {
         await this.persistOpkPool();
-        void this.deps.api.consumeOpk(this.identity.did, usedOpkId).catch(() => undefined);
+        void this.deps.api.consumeOpk(this.identity.did, usedOpkId, this.deviceDkId).catch(() => undefined);
         void this.topUpOpkPool().catch(() => undefined);
       }
       const handshake = JSON.parse(bytesToUtf8(plaintext)) as HandshakePayload;

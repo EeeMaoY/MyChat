@@ -7,10 +7,13 @@ import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "r
 import {
   createCustodyBackup,
   exportAllData,
+  getMyDevice,
   getReadReceiptsEnabled,
   getRecoverySelf,
   importAllData,
   listCustodyCopies,
+  listMyDevices,
+  revokeMyDevice,
   setNotice,
   setReadReceiptsEnabled,
   setupGuardians,
@@ -72,6 +75,20 @@ export default function ProfileModal({ onClose }: Props) {
   const [guardiansPending, setGuardiansPending] = useState(false);
   const [guardiansError, setGuardiansError] = useState<string | null>(null);
 
+  // —— 设备管理（M2-S10 FR-1.4）——
+  interface DeviceRow {
+    dkId: string;
+    label: string;
+    issuedAt: number;
+    expiresAt: number;
+    revoked: boolean;
+    expired: boolean;
+  }
+  const [myDevice, setMyDevice] = useState<{ dkId: string; label: string; expiresAt: number } | null>(null);
+  const [devices, setDevices] = useState<DeviceRow[] | null>(null);
+  const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
+  const [revokePending, setRevokePending] = useState(false);
+
   useEffect(() => {
     let alive = true;
     void getReadReceiptsEnabled().then((enabled) => {
@@ -84,6 +101,21 @@ export default function ProfileModal({ onClose }: Props) {
       if (alive) {
         setRecoverySelf(self);
         setSelfLoaded(true);
+      }
+    });
+    setMyDevice(getMyDevice());
+    void listMyDevices().then((rows) => {
+      if (alive) {
+        setDevices(
+          rows.map((d) => ({
+            dkId: d.certificate.dkId,
+            label: d.certificate.label,
+            issuedAt: d.certificate.issuedAt,
+            expiresAt: d.certificate.expiresAt,
+            revoked: d.revoked,
+            expired: d.expired,
+          })),
+        );
       }
     });
     return () => {
@@ -245,6 +277,34 @@ export default function ProfileModal({ onClose }: Props) {
     return state.contacts.find((c) => c.did === targetDid)?.name ?? shortDid(targetDid);
   }
 
+  // —— 设备管理 ——
+
+  /** 吊销一台设备（两段确认：revokeTarget 记录待吊销目标，再次点击执行）。 */
+  async function handleRevoke(dkId: string): Promise<void> {
+    if (revokePending) return;
+    if (revokeTarget !== dkId) {
+      setRevokeTarget(dkId);
+      return;
+    }
+    setRevokePending(true);
+    try {
+      await revokeMyDevice(dkId);
+      setDevices((prev) => prev?.map((d) => (d.dkId === dkId ? { ...d, revoked: true } : d)) ?? null);
+      setNotice(dkId === myDevice?.dkId ? "本设备已被吊销：请导出备份后停止使用此浏览器收发消息" : "设备已吊销，对方将自动轮换会话");
+    } catch (err) {
+      setNotice(err instanceof Error ? `吊销失败：${err.message}` : "吊销失败");
+    } finally {
+      setRevokePending(false);
+      setRevokeTarget(null);
+    }
+  }
+
+  function deviceStatus(d: DeviceRow): { text: string; cls: string } {
+    if (d.revoked) return { text: "已吊销", cls: "off" };
+    if (d.expired) return { text: "已过期", cls: "off" };
+    return { text: "活跃", cls: "on" };
+  }
+
   const showGuardianSetup = !selfLoaded || recoverySelf === null || editingGuardians;
 
   return (
@@ -300,6 +360,47 @@ export default function ProfileModal({ onClose }: Props) {
         />
         已读回执（对方能看到你是否已读）
       </label>
+
+      {/* 设备管理（M2-S10 FR-1.4） */}
+      <label className="field-label">设备管理</label>
+      {myDevice !== null && (
+        <p className="field-hint">
+          本设备：<b>{myDevice.label}</b>（{shortDid(myDevice.dkId)}），凭证有效期至{" "}
+          {new Date(myDevice.expiresAt).toLocaleDateString()}，到期自动续签。
+        </p>
+      )}
+      {devices === null ? (
+        <p className="field-hint">设备列表加载中…</p>
+      ) : devices.length === 0 ? (
+        <p className="field-hint">暂无已登记设备（首次发送消息后会自动登记）。</p>
+      ) : (
+        <div className="guardian-list">
+          {devices.map((d) => {
+            const status = deviceStatus(d);
+            const isSelf = d.dkId === myDevice?.dkId;
+            return (
+              <div key={d.dkId} className="guardian-item">
+                <span className={`online-dot ${status.cls}`} aria-hidden="true" />
+                <span className="guardian-item-name">{d.label}</span>
+                <span className="guardian-item-did">{shortDid(d.dkId)}{isSelf ? " · 本设备" : ""}</span>
+                {!d.revoked && !d.expired && (
+                  <button
+                    className="btn-ghost"
+                    disabled={revokePending}
+                    onClick={() => void handleRevoke(d.dkId)}
+                  >
+                    {revokeTarget === d.dkId ? (revokePending ? "吊销中…" : "确认吊销？") : "吊销"}
+                  </button>
+                )}
+                {(d.revoked || d.expired) && <span className="custody-meta">{status.text}</span>}
+              </div>
+            );
+          })}
+        </div>
+      )}
+      <p className="field-hint">
+        吊销后该设备的预密钥材料立即停发，联系人会自动重建会话；被吊销设备需从备份重新导入才能恢复使用。
+      </p>
 
       {/* 数据安全：导出/导入（FR-7.2）与好友托管备份（FR-7.3） */}
       <label className="field-label">数据安全</label>

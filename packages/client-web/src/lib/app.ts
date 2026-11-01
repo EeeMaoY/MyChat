@@ -185,6 +185,30 @@ export function getMessaging(): Messaging | null {
   return messaging;
 }
 
+// ---------- 设备管理（FR-1.4 多设备，M2-S10 UI 接入用） ----------
+
+/** 本机设备信息（null=应用未就绪）。 */
+export function getMyDevice(): { dkId: string; label: string; issuedAt: number; expiresAt: number } | null {
+  if (!messaging) return null;
+  return {
+    dkId: messaging.deviceDkId,
+    label: messaging.deviceCert.label,
+    issuedAt: messaging.deviceCert.issuedAt,
+    expiresAt: messaging.deviceCert.expiresAt,
+  };
+}
+
+/** 我名下的全部设备（KT 事件流本地折叠，含已吊销/已过期）。 */
+export async function listMyDevices() {
+  return (await messaging?.listMyDevices()) ?? [];
+}
+
+/** 吊销一台设备（本设备吊销后将无法再收发消息，UI 侧确认）。 */
+export async function revokeMyDevice(dkId: string): Promise<void> {
+  if (!messaging) throw new Error("应用尚未就绪");
+  await messaging.revokeMyDevice(dkId);
+}
+
 // ---------- 数据导出与托管（FR-7.2/7.3，UI 接入用） ----------
 
 export async function exportAllData(): Promise<string> {

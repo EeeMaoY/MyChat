@@ -59,6 +59,22 @@ async function readError(res: Response): Promise<never> {
   throw new NodeApiError(res.status, message);
 }
 
+/** 节点设备列表条目（节点视图；客户端须本地验签折叠后才可采信，SR-5）。 */
+export interface DeviceRecordJson {
+  certificate: {
+    version: number;
+    did: string;
+    dkId: string;
+    label: string;
+    issuedAt: number;
+    expiresAt: number;
+    signature: string;
+  };
+  revoked: boolean;
+  revokedAt: number | null;
+  expired: boolean;
+}
+
 export class NodeApi {
   constructor(private baseUrl: string) {}
 
@@ -86,12 +102,15 @@ export class NodeApi {
     };
   }
 
-  async putBundle(did: string, bundle: Uint8Array): Promise<void> {
-    const res = await fetch(`${this.baseUrl}/v0/registry/bundle/${encodeURIComponent(did)}`, {
-      method: "PUT",
-      headers: { "content-type": "application/octet-stream" },
-      body: new Uint8Array(bundle),
-    });
+  async putBundle(did: string, bundle: Uint8Array, device: string): Promise<void> {
+    const res = await fetch(
+      `${this.baseUrl}/v0/registry/bundle/${encodeURIComponent(did)}?device=${encodeURIComponent(device)}`,
+      {
+        method: "PUT",
+        headers: { "content-type": "application/octet-stream" },
+        body: new Uint8Array(bundle),
+      },
+    );
     if (!res.ok) await readError(res);
   }
 
@@ -102,22 +121,59 @@ export class NodeApi {
     return new Uint8Array(await res.arrayBuffer());
   }
 
-  // ----- OPK 池（M2-S9） -----
+  // ----- 设备注册表（M2-S10 FR-1.4） -----
 
-  async addOpks(did: string, opks: { id: number; public: string }[]): Promise<void> {
-    if (opks.length === 0) return;
-    const res = await fetch(`${this.baseUrl}/v0/registry/bundle/${encodeURIComponent(did)}/opks`, {
-      method: "POST",
+  /** 登记设备凭证（IK 签名，节点验签准入 + KT 锚定）。 */
+  async putDevice(did: string, certificate: Record<string, unknown>): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/v0/registry/devices/${encodeURIComponent(did)}`, {
+      method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ opks }),
+      body: JSON.stringify({ certificate }),
     });
     if (!res.ok) await readError(res);
   }
 
-  async consumeOpk(did: string, opkId: number): Promise<void> {
-    const res = await fetch(`${this.baseUrl}/v0/registry/bundle/${encodeURIComponent(did)}/opk/${opkId}`, {
-      method: "DELETE",
-    });
+  /** 吊销设备（IK 签名吊销声明；节点停发该设备预密钥材料 + KT 锚定）。 */
+  async revokeDevice(did: string, dkId: string, revocation: Record<string, unknown>): Promise<void> {
+    const res = await fetch(
+      `${this.baseUrl}/v0/registry/devices/${encodeURIComponent(did)}/${encodeURIComponent(dkId)}`,
+      {
+        method: "DELETE",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ revocation }),
+      },
+    );
+    if (!res.ok) await readError(res);
+  }
+
+  /** 设备列表（节点视图；客户端须本地验签折叠后才可采信，SR-5）。 */
+  async getDevices(did: string): Promise<DeviceRecordJson[]> {
+    const res = await fetch(`${this.baseUrl}/v0/registry/devices/${encodeURIComponent(did)}`);
+    if (!res.ok) await readError(res);
+    const body = (await res.json()) as { devices: DeviceRecordJson[] };
+    return body.devices;
+  }
+
+  // ----- OPK 池（M2-S9；M2-S10 起按设备分槽） -----
+
+  async addOpks(did: string, opks: { id: number; public: string }[], device: string): Promise<void> {
+    if (opks.length === 0) return;
+    const res = await fetch(
+      `${this.baseUrl}/v0/registry/bundle/${encodeURIComponent(did)}/opks?device=${encodeURIComponent(device)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ opks }),
+      },
+    );
+    if (!res.ok) await readError(res);
+  }
+
+  async consumeOpk(did: string, opkId: number, device: string): Promise<void> {
+    const res = await fetch(
+      `${this.baseUrl}/v0/registry/bundle/${encodeURIComponent(did)}/opk/${opkId}?device=${encodeURIComponent(device)}`,
+      { method: "DELETE" },
+    );
     if (!res.ok) await readError(res);
   }
 
@@ -137,6 +193,16 @@ export class NodeApi {
     if (res.status === 404) return null;
     if (!res.ok) await readError(res);
     return (await res.json()) as Record<string, unknown>;
+  }
+
+  // ----- KT Log（设备集本地折叠的数据源，SR-5） -----
+
+  /** 拉取某 DID 的 KT 事件流（全量；设备折叠与包含性验证在客户端本地完成）。 */
+  async getKtEvents(did: string): Promise<{ did: string; type: string; index: number; payload: string }[]> {
+    const res = await fetch(`${this.baseUrl}/v0/kt/list/${encodeURIComponent(did)}`);
+    if (!res.ok) await readError(res);
+    const body = (await res.json()) as { events: { did: string; type: string; index: number; payload: string }[] };
+    return body.events;
   }
 
   // ----- Storage: 信箱 -----
