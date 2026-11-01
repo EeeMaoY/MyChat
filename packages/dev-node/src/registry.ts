@@ -131,10 +131,16 @@ export function consumeOpk(store: BundleStore, did: string, opkId: number): bool
 }
 
 /** 池水位（客户端低水位补充用）。 */
-export function opkPoolStats(store: BundleStore, did: string): { available: number; issued: number } {
+export function opkPoolStats(store: BundleStore, did: string): { available: number; issued: number; poolKeys: number[]; issuedKeys: number[] } {
   const pool = store.opkPools.get(did);
   const issued = store.issued.get(did);
-  const issuedCount = issued ? [...issued].filter((id) => pool?.has(id)).length : 0;
-  return { available: (pool?.size ?? 0) - issuedCount, issued: issuedCount };
+  const issuedKeys = issued ? [...issued] : [];
+  const issuedCount = issuedKeys.filter((id) => pool?.has(id)).length;
+  return {
+    available: (pool?.size ?? 0) - issuedCount,
+    issued: issuedCount,
+    poolKeys: pool ? [...pool.keys()] : [],
+    issuedKeys,
+  };
 }
 

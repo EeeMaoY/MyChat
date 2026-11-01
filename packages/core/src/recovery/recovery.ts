@@ -143,6 +143,7 @@ export function createRecoverySetup(
   identity: Identity,
   guardianDids: string[],
   threshold: number,
+  myName: string | null = null,
 ): RecoverySetup {
   if (guardianDids.length < 2) throw new Error("守护者至少 2 位");
   const rk = randomBytes(32);
@@ -150,7 +151,7 @@ export function createRecoverySetup(
     guardianDid: guardianDids[i]!,
     share,
   }));
-  const wrap = sealIdentityWrap(rk, { identityJson: serializeIdentity(identity), myName: null });
+  const wrap = sealIdentityWrap(rk, { identityJson: serializeIdentity(identity), myName });
   const wrapCid = base58Encode(blake3Hash(wrap));
   const announcement = makeRecoveryAnnouncement(identity, wrapCid, threshold, guardianDids);
   return { did: identity.did, wrapCid, rk, shares, wrap, announcement };

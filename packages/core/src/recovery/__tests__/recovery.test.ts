@@ -89,7 +89,7 @@ describe("社交恢复全流程（3-of-5）", () => {
 
   it("身份包裹的 RK 错误必被 AEAD 认证拒绝", () => {
     const owner = createIdentity();
-    const wrap = sealIdentityWrap(randomBytes(32), JSON.stringify({ did: owner.did }));
+    const wrap = sealIdentityWrap(randomBytes(32), { identityJson: JSON.stringify({ did: owner.did }), myName: null });
     expect(() => openIdentityWrap(randomBytes(32), wrap)).toThrow();
   });
 
