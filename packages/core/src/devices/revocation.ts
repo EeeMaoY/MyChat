@@ -102,7 +102,7 @@ export function decodeDeviceRevocationJson(text: string): DeviceRevocation {
   const raw = JSON.parse(text) as Record<string, unknown>;
   if (raw.version !== 1) throw new Error("吊销声明版本不识别");
   if (typeof raw.did !== "string" || typeof raw.dkId !== "string") throw new Error("吊销声明字段非法");
-  if (!Number.isSafeInteger(raw.revokedAt)) throw new Error("吊销声明时间字段非法");
+  if (typeof raw.revokedAt !== "number" || !Number.isSafeInteger(raw.revokedAt)) throw new Error("吊销声明时间字段非法");
   if (typeof raw.signature !== "string") throw new Error("吊销声明签名字段缺失");
   return {
     version: 1,

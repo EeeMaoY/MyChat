@@ -157,7 +157,7 @@ export function decodeDeviceCertificateJson(text: string): DeviceCertificate {
   if (typeof raw.did !== "string" || typeof raw.dkId !== "string" || typeof raw.label !== "string") {
     throw new Error("设备凭证字段非法");
   }
-  if (!Number.isSafeInteger(raw.issuedAt) || !Number.isSafeInteger(raw.expiresAt)) {
+  if (typeof raw.issuedAt !== "number" || typeof raw.expiresAt !== "number" || !Number.isSafeInteger(raw.issuedAt) || !Number.isSafeInteger(raw.expiresAt)) {
     throw new Error("设备凭证时间字段非法");
   }
   if (typeof raw.signature !== "string") throw new Error("设备凭证签名字段缺失");
