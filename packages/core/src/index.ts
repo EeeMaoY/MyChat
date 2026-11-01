@@ -27,4 +27,5 @@ export * from "./ssss/index.ts";
 export * from "./ktmerkle/index.ts";
 export * from "./recovery/index.ts";
 export * from "./devices/index.ts";
+export * from "./groups/index.ts";
 
