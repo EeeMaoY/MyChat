@@ -1,6 +1,8 @@
 # MyChat
 
-去中心化安全社交网络（Decentralized Secure Social Network）—— **Web 客户端优先**。
+去中心化安全社交网络（Decentralized Secure Social Network）。
+
+个人计算机网络课程期末项目，以实现可交付 Web 端为初期目标，期末提交。
 
 > 核心命题：内容端到端加密、元数据被架构性保护、数据完全属于用户，同时拥有中心化平台的使用便利。
 
