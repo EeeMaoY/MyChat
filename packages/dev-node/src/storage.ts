@@ -34,6 +34,11 @@ export function getBlock(store: StorageStore, cid: string): Uint8Array | undefin
   return store.blocks.get(cid);
 }
 
+/** 物理删除（FR-4.4 动态删除的物理增强，M3-S12）；幂等，返回是否实际删除。 */
+export function deleteBlock(store: StorageStore, cid: string): boolean {
+  return store.blocks.delete(cid);
+}
+
 export function mailboxAppend(store: StorageStore, mailboxId: string, envelope: Envelope): number {
   let box = store.mailboxes.get(mailboxId);
   if (!box) {

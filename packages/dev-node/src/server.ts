@@ -44,6 +44,7 @@ import {
 } from "./registry.ts";
 import {
   createStorageStore,
+  deleteBlock,
   getBlock,
   mailboxAppend,
   mailboxFetch,
@@ -378,6 +379,12 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
         res.writeHead(200, { "content-type": "application/octet-stream" });
         res.end(Buffer.from(block));
         return;
+      }
+      if (req.method === "DELETE") {
+        // 物理删除（FR-4.4 动态删除的物理增强，M3-S12）：CAS 无归属，已知 cid 即可删
+        // （cid 不可枚举，攻击者需已知 cid；开发节点属性，配额与审计为后续）
+        const removed = deleteBlock(state.storage, cid);
+        return sendJson(res, 200, { deleted: removed });
       }
     }
 

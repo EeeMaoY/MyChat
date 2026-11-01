@@ -409,6 +409,17 @@ describe("Storage（块 + 信箱）", () => {
     expect((await fetch(`${base}/v0/storage/blocks/bafk-missing`)).status).toBe(404);
   });
 
+  it("块 DELETE：物理删除后 404，幂等（M3-S12 动态删除的物理增强）", async () => {
+    const data = randomBytes(128);
+    await fetch(`${base}/v0/storage/blocks/bafk-del-1`, { method: "PUT", body: Buffer.from(data) });
+    const del = (await (await fetch(`${base}/v0/storage/blocks/bafk-del-1`, { method: "DELETE" })).json()) as { deleted: boolean };
+    expect(del.deleted).toBe(true);
+    expect((await fetch(`${base}/v0/storage/blocks/bafk-del-1`)).status).toBe(404);
+    // 幂等：重复删除不报错
+    const again = (await (await fetch(`${base}/v0/storage/blocks/bafk-del-1`, { method: "DELETE" })).json()) as { deleted: boolean };
+    expect(again.deleted).toBe(false);
+  });
+
   it("信箱 append → fetch 增量拉取（cursor 语义）", async () => {
     const mailbox = "mailbox-pseudonym-A";
     for (let i = 0; i < 3; i++) {
