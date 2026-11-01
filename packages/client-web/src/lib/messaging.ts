@@ -51,7 +51,7 @@ import {
   EPOCH_MS,
 } from "@mychat/core";
 
-import { fromHex, toBase64, toHex } from "./base64";
+import { fromBase64, fromHex, toBase64, toHex } from "./base64";
 import { discoveryInboxId } from "./discovery";
 import type { NodeApi } from "./node-api";
 
@@ -687,7 +687,8 @@ export class Messaging {
           wrapCid: String(announcement.wrapCid),
           threshold: Number(announcement.threshold),
           guardians: announcement.guardians as string[],
-          signature: base58Decode(String(announcement.signature)),
+          // 公告 signature 以 base64 上节点（见 setupGuardians），读取须同编码
+          signature: fromBase64(String(announcement.signature)),
         });
       } catch {
         verified = false;
