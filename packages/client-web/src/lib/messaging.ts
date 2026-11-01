@@ -14,6 +14,9 @@ import {
   decodePreKeyBundle,
   decodeSessionWire,
   type Envelope,
+  type GroupKeysPayload,
+  type GroupState,
+  type GroupView,
   type Identity,
   type KTEvent,
   type KVStore,
@@ -21,29 +24,41 @@ import {
   type PreKeyBundle,
   type Session,
   createRecoverySetup,
+  addGroupMember,
+  applyGroupKeysPayload,
+  createGroup,
+  createGroupView,
   decodeDeviceCertificateJson,
+  decodeGroupStateJson,
   deriveOpkId,
   deserializeIdentity,
   deserializeSession,
   encodeDeviceCertificateJson,
   encodeDeviceRevocationJson,
+  encodeGroupStateJson,
   encodePreKeyBundle,
   fingerprintDeviceIds,
   activeDeviceIds,
   foldDeviceEvents,
   generateEd25519KeyPair,
+  generateSenderKeys,
   generateX25519KeyPair,
+  groupMailboxId,
   initiateSession,
   issuePreKeyBundle,
   makeDeviceCertificate,
   makeDeviceRevocation,
+  makeGroupKeysPayload,
   makeEnvelope,
   makeUserNameRecord,
+  openGroupMessage,
   openGuardianShare,
   openIdentityWrap,
   padClassForLength,
   recoverRk,
+  removeGroupMember,
   sealGuardianShare,
+  sealGroupMessage,
   serializeIdentity,
   serializeSession,
   sessionMailbox,
@@ -57,6 +72,7 @@ import {
   decryptAttachment,
   encryptAttachment,
   verifyDeviceCertificate,
+  verifyGroupState,
   verifyPreKeyBundle,
   verifyUserNameRecord,
   type DeviceCertificate,
@@ -106,6 +122,34 @@ export interface ChatMessage {
   at: number;
   /** out 消息的回执状态：sent=已投递节点信箱，delivered=对端已拉取，read=对端已读（FR-5.2） */
   status?: "sent" | "delivered" | "read";
+  /** 群消息（did = group:<groupId>）：实际发送者（UI 显示气泡署名，M3-S11） */
+  senderDid?: string;
+}
+
+/** 会话键：1:1 = 对方 DID；群组 = group:<groupId>（UI 与消息存储统一路由）。 */
+export function groupChatKey(groupId: string): string {
+  return `group:${groupId}`;
+}
+
+/** 群组条目（UI 快照用）。 */
+export interface GroupSummary {
+  groupId: string;
+  name: string;
+  owner: string;
+  epoch: number;
+  memberCount: number;
+  /** 我是否群主（管理权限判定） */
+  amOwner: boolean;
+}
+
+/** GroupKeysPayload 的客户端持久化 JSON 形态（kv 存储；senderKeys base58）。 */
+export interface GroupKeysPayloadJson {
+  v: 1;
+  groupId: string;
+  epoch: number;
+  groupSecret: string;
+  state: Record<string, unknown>;
+  senderKeys: { did: string; key: string }[];
 }
 
 /**
@@ -122,7 +166,9 @@ type SessionPayload =
   /** 社交恢复（FR-1.3）：邀请成为守护者 / 请求回传分片 / 回传分片（设计报告 §4.3） */
   | { v: 1; type: "guardian-invite"; did: string; wrapCid: string; sealedShare: string }
   | { v: 1; type: "recovery-request"; did: string }
-  | { v: 1; type: "recovery-share"; did: string; shareX: number; shareY: string };
+  | { v: 1; type: "recovery-share"; did: string; shareX: number; shareY: string }
+  /** 群组（FR-6.1，M3-S11）：群密钥分发载荷（经 1:1 DR 会话，被移除者不可达） */
+  | { v: 1; type: "group-keys"; payload: GroupKeysPayloadJson };
 
 /** 开放备份包格式（FR-7.2；明文 JSON，导出文件的保管责任在用户，UX-7 披露） */
 interface ExportBundle {
@@ -196,6 +242,8 @@ export class Messaging {
   sessions = new Map<string, Session>();
   contacts = new Map<string, Contact>();
   messages = new Map<string, ChatMessage[]>();
+  /** groupId → 群视角（状态/群秘密/发送密钥/序号；M3-S11） */
+  groups = new Map<string, GroupView>();
   online = true;
 
   private cursors = new Map<string, number>();
@@ -423,10 +471,24 @@ export class Messaging {
       const contact = JSON.parse(bytesToUtf8(raw)) as Contact;
       this.contacts.set(contact.did, contact);
     }
+    // 群视角恢复（M3-S11）：kv 存 GroupKeysPayloadJson，加载即重建可解密状态
+    for (const key of await this.deps.kv.keys("groupview:")) {
+      const raw = await this.deps.kv.get(key);
+      if (!raw) continue;
+      try {
+        const view = applyGroupKeysPayload(JSON.parse(bytesToUtf8(raw)) as GroupKeysPayload);
+        this.groups.set(view.state.groupId, view);
+      } catch {
+        /* 损坏条目跳过（不阻塞其余群恢复） */
+      }
+    }
     for (const did of this.contacts.keys()) {
       const sessionRaw = await this.deps.kv.get(sessionKey(did));
       if (sessionRaw) this.sessions.set(did, deserializeSession(bytesToUtf8(sessionRaw)));
       await this.loadMessages(did);
+    }
+    for (const groupId of this.groups.keys()) {
+      await this.loadMessages(groupChatKey(groupId));
     }
     for (const key of await this.deps.kv.keys("cursor:")) {
       const raw = await this.deps.kv.get(key);
@@ -511,6 +573,219 @@ export class Messaging {
       return null;
     } catch (err) {
       return err instanceof Error ? err.message : "添加失败";
+    }
+  }
+
+  // ----- 群组（FR-6.1/6.2，M3-S11：Sender-Keys 1:1 扇出，M3 计划 §3） -----
+
+  /** 群条目快照（UI 侧栏/群聊头）。 */
+  groupSummaries(): GroupSummary[] {
+    return [...this.groups.values()].map((v) => ({
+      groupId: v.state.groupId,
+      name: v.state.name,
+      owner: v.state.owner,
+      epoch: v.state.epoch,
+      memberCount: v.state.members.length,
+      amOwner: v.state.owner === this.identity.did,
+    }));
+  }
+
+  /**
+   * 建群并分发密钥：生成群状态（IK 签名）与 epoch-1 发送密钥集，
+   * GroupKeysPayload 经各成员 1:1 DR 会话投递（节点只见群信箱伪地址与密文）。
+   * 返回错误文案（null = 成功）。
+   */
+  async createGroupAndInvite(name: string, memberDids: string[]): Promise<string | null> {
+    try {
+      if (memberDids.length < 2) return "群组至少需要 2 位联系人（含你共 3 人）";
+      for (const did of memberDids) {
+        if (!this.sessions.has(did)) return "群成员必须是已建立会话的联系人";
+      }
+      const { state, groupSecret } = createGroup(this.identity.ikEd.privateKey, name, this.identity.did, memberDids);
+      const senderKeys = generateSenderKeys(state.members.map((m) => m.did));
+      this.groups.set(state.groupId, createGroupView(state, groupSecret, senderKeys));
+      await this.persistGroupView(state.groupId);
+      for (const did of state.members.map((m) => m.did)) {
+        if (did === this.identity.did) continue;
+        await this.sendGroupKeysTo(did, state.groupId);
+      }
+      await this.appendLocalMessage(groupChatKey(state.groupId), "out", `群「${name}」已创建，邀请已发送`, "handshake");
+      this.restartRealtime();
+      this.emit();
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err.message : "建群失败";
+    }
+  }
+
+  /** 把某群当前 epoch 的密钥载荷经 1:1 会话投给指定成员。 */
+  private async sendGroupKeysTo(memberDid: string, groupId: string): Promise<void> {
+    const view = this.groups.get(groupId);
+    const session = this.sessions.get(memberDid);
+    if (!view || !session) throw new Error("群或会话不存在");
+    const wire = sessionSend(
+      session,
+      utf8ToBytes(
+        JSON.stringify({
+          v: 1,
+          type: "group-keys",
+          payload: makeGroupKeysPayload(view.state, view.groupSecret, view.senderKeys) satisfies GroupKeysPayload,
+        } satisfies SessionPayload),
+      ),
+    );
+    const mailboxId = sessionMailbox(session, "send", Date.now());
+    await this.deps.api.mailboxAppend(mailboxId, this.seal(wire, mailboxId));
+  }
+
+  /** 消费 1:1 会话收到的群密钥载荷：验签、落库、订阅群信箱。 */
+  private async handleGroupKeys(payload: GroupKeysPayload): Promise<void> {
+    const view = applyGroupKeysPayload(payload);
+    // 仅接受自己确为成员的群（防陌生人推送伪造群配置）
+    if (!view.state.members.some((m) => m.did === this.identity.did)) return;
+    const existed = this.groups.get(view.state.groupId);
+    // epoch 必须前进（重放旧载荷无意义；载荷内状态已验签）
+    if (existed && view.state.epoch <= existed.state.epoch) return;
+    this.groups.set(view.state.groupId, view);
+    await this.persistGroupView(view.state.groupId);
+    if (!existed) {
+      await this.appendLocalMessage(groupChatKey(view.state.groupId), "in", `已加入群「${view.state.name}」`, "handshake");
+    } else {
+      this.onGroupRotated?.(view.state.groupId, view.state.name);
+    }
+    this.restartRealtime();
+    this.emit();
+  }
+
+  /** 群 epoch 轮换回调（成员变更后 UI 提示）。 */
+  onGroupRotated: ((groupId: string, name: string) => void) | null = null;
+
+  /** 群视角持久化（GroupKeysPayloadJson 形态，加载即恢复可解密状态）。 */
+  private async persistGroupView(groupId: string): Promise<void> {
+    const view = this.groups.get(groupId);
+    if (!view) return;
+    const payload = makeGroupKeysPayload(view.state, view.groupSecret, view.senderKeys);
+    await this.deps.kv.put(`groupview:${groupId}`, utf8ToBytes(JSON.stringify(payload)));
+  }
+
+  /** 发送群文本消息（组内双层信封 → 群信箱）。 */
+  async sendGroupMessage(groupId: string, text: string): Promise<void> {
+    await this.sendGroupPayload(groupId, { v: 1, type: "chat", text }, "chat", text);
+  }
+
+  /** 发送群附件（随机 CK → CAS 块 → CID/CK 进组内密文，群成员可取）。 */
+  async sendGroupAttachment(
+    groupId: string,
+    file: { data: Uint8Array; name: string; mime: string },
+    kind: "image" | "file",
+  ): Promise<void> {
+    if (file.data.length > 8 * 1024 * 1024) throw new Error("附件超过 8MB 上限");
+    const att = encryptAttachment(file.data);
+    await this.deps.api.putBlock(att.cid, att.ciphertext);
+    await this.sendGroupPayload(
+      groupId,
+      {
+        v: 1,
+        type: kind,
+        cid: att.cid,
+        contentKey: base58Encode(att.contentKey),
+        nonce: base58Encode(att.nonce),
+        name: file.name,
+        size: file.data.length,
+        mime: file.mime,
+      },
+      kind,
+      file.name,
+    );
+  }
+
+  private async sendGroupPayload(groupId: string, payload: SessionPayload, kind: MessageKind, text: string): Promise<void> {
+    const view = this.groups.get(groupId);
+    if (!view) throw new Error("群不存在");
+    const mySk = view.senderKeys.get(this.identity.did);
+    if (!mySk) throw new Error("缺少本群发送密钥（等待群主重新分发）");
+    const index = view.sendIndex;
+    const plaintext = utf8ToBytes(JSON.stringify(payload));
+    const groupWire = sealGroupMessage(
+      this.identity.ikEd.privateKey,
+      this.identity.did,
+      mySk,
+      view.groupSecret,
+      groupId,
+      view.state.epoch,
+      index,
+      plaintext,
+    );
+    view.sendIndex = index + 1;
+    const mailboxId = groupMailboxId(view.groupSecret, view.state.epoch);
+    await this.deps.api.mailboxAppend(mailboxId, this.seal(groupWire, mailboxId));
+    if (payload.type !== "receipt") {
+      await this.appendLocalMessage(groupChatKey(groupId), "out", text, kind, payload);
+    }
+    this.emit();
+  }
+
+  /** 邀请成员（群主）：epoch+1 → 新 SK 集重分发全员（断读语义不含新成员的历史）。 */
+  async addMemberToGroup(groupId: string, memberDid: string): Promise<string | null> {
+    return await this.rotateGroup(groupId, (ik, state) => addGroupMember(ik, state, memberDid));
+  }
+
+  /** 移除成员（群主，FR-6.2 断读）：epoch+1 → 幸存成员重分发；被移除者不可达新面。 */
+  async removeMemberFromGroup(groupId: string, memberDid: string): Promise<string | null> {
+    return await this.rotateGroup(groupId, (ik, state) => removeGroupMember(ik, state, memberDid));
+  }
+
+  /** 成员变更统一路径：重签状态 → 重生成 SK → 分发幸存成员 → 刷新本地视角。 */
+  private async rotateGroup(
+    groupId: string,
+    mutate: (ik: Uint8Array, state: GroupState) => GroupState,
+  ): Promise<string | null> {
+    try {
+      const view = this.groups.get(groupId);
+      if (!view) return "群不存在";
+      if (view.state.owner !== this.identity.did) return "仅群主可管理成员";
+      const nextState = mutate(this.identity.ikEd.privateKey, view.state);
+      if (!verifyGroupState(nextState)) return "群状态重签失败";
+      const newKeys = generateSenderKeys(nextState.members.map((m) => m.did));
+      this.groups.set(groupId, createGroupView(nextState, view.groupSecret, newKeys));
+      await this.persistGroupView(groupId);
+      for (const member of nextState.members) {
+        if (member.did === this.identity.did) continue;
+        if (!this.sessions.has(member.did)) continue;
+        await this.sendGroupKeysTo(member.did, groupId);
+      }
+      this.onGroupRotated?.(groupId, nextState.name);
+      this.restartRealtime();
+      this.emit();
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err.message : "群成员变更失败";
+    }
+  }
+
+  /** 拉取全部群信箱（当前 epoch；epoch 轮换后旧信箱自然废弃）。 */
+  private async pollGroups(): Promise<void> {
+    for (const [groupId, view] of this.groups) {
+      const mailboxId = groupMailboxId(view.groupSecret, view.state.epoch);
+      const cursor = await this.cursorFor(mailboxId);
+      const { envelopes, cursor: next } = await this.deps.api.mailboxFetch(mailboxId, cursor);
+      for (const envelope of envelopes) {
+        try {
+          const groupWire = stripPadding(envelope.payload);
+          const opened = openGroupMessage(view, groupWire);
+          const parsed = JSON.parse(bytesToUtf8(opened.plaintext)) as SessionPayload;
+          const chatKey = groupChatKey(groupId);
+          if (parsed?.v === 1 && typeof parsed.type === "string") {
+            if (parsed.type === "chat") {
+              await this.appendLocalMessage(chatKey, "in", parsed.text, "chat", undefined, opened.senderDid);
+            } else if (parsed.type === "image" || parsed.type === "file") {
+              await this.appendLocalMessage(chatKey, "in", parsed.name, parsed.type, parsed, opened.senderDid);
+            }
+          }
+        } catch {
+          // 外层/内层解密失败、伪造签名、重放：安全丢弃（SR-4）
+        }
+      }
+      await this.advanceCursor(mailboxId, next, envelopes.length > 0);
     }
   }
 
@@ -965,13 +1240,14 @@ export class Messaging {
 
   // ----- 接收（FR-5.1 在线直投 + 离线信箱） -----
 
-  /** 拉取发现信箱 + 全部会话的接收信箱（覆盖上一个/当前/下一个 epoch，防轮换漏收）。 */
+  /** 拉取发现信箱 + 全部会话的接收信箱 + 全部群信箱（覆盖三 epoch 窗口，防轮换漏收）。 */
   async poll(): Promise<void> {
     try {
       await this.pollDiscovery();
       for (const did of this.contacts.keys()) {
         await this.pollSession(did);
       }
+      await this.pollGroups();
       this.online = true;
     } catch {
       this.online = false;
@@ -1132,6 +1408,11 @@ export class Messaging {
       this.emit();
       return null;
     }
+    if (payload.type === "group-keys") {
+      // 群密钥分发（经 1:1 DR 会话）：验签后入群/刷新 epoch（M3-S11）
+      await this.handleGroupKeys(payload.payload);
+      return null;
+    }
     if (payload.type === "chat") {
       return await this.appendLocalMessage(did, "in", payload.text, "chat");
     }
@@ -1228,6 +1509,10 @@ export class Messaging {
         mailboxes.push(sessionMailbox(session, "recv", at));
       }
     }
+    // 群信箱订阅（当前 epoch；轮换后 restartRealtime 切新信箱，M3-S11）
+    for (const view of this.groups.values()) {
+      mailboxes.push(groupMailboxId(view.groupSecret, view.state.epoch));
+    }
     const stopWs = this.deps.api.subscribeMailboxes(mailboxes, () => void this.poll());
     this.pollTimer = setInterval(() => void this.poll(), 3000);
     this.stopWs = stopWs;
@@ -1262,6 +1547,7 @@ export class Messaging {
     text: string,
     kind: MessageKind,
     payload?: SessionPayload,
+    senderDid?: string,
   ): Promise<ChatMessage> {
     const attachment: AttachmentMeta | undefined =
       payload && (payload.type === "image" || payload.type === "file")
@@ -1281,6 +1567,7 @@ export class Messaging {
       kind,
       text,
       ...(attachment ? { attachment } : {}),
+      ...(senderDid ? { senderDid } : {}),
       at: Date.now(),
       ...(direction === "out" && kind !== "handshake" ? { status: "sent" as const } : {}),
     };

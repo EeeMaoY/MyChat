@@ -9,7 +9,7 @@ import { useSyncExternalStore } from "react";
 
 import { base58Decode, createIdbKVStore, decryptAttachment, type KVStore } from "@mychat/core";
 
-import { Messaging, type ChatMessage, type Contact } from "./messaging";
+import { Messaging, groupChatKey, type ChatMessage, type Contact, type GroupSummary } from "./messaging";
 import { NodeApi } from "./node-api";
 
 export type Phase = "loading" | "welcome" | "creating" | "set-name" | "main";
@@ -19,10 +19,12 @@ export interface AppState {
   did: string | null;
   myName: string | null;
   contacts: Contact[];
+  groups: GroupSummary[];
   messages: Record<string, ChatMessage[]>;
   online: boolean;
   notice: string | null;
-  activeDid: string | null; // 当前打开的会话
+  /** 当前打开的会话：1:1 = 对方 DID；群组 = group:<groupId>（M3-S11） */
+  activeDid: string | null;
 }
 
 let kv: KVStore | null = null;
@@ -34,6 +36,7 @@ let state: AppState = {
   did: null,
   myName: null,
   contacts: [],
+  groups: [],
   messages: {},
   online: true,
   notice: null,
@@ -70,6 +73,7 @@ function syncFromMessaging(): void {
   setState({
     myName: messaging.myName,
     contacts: [...messaging.contacts.values()].sort((a, b) => b.addedAt - a.addedAt),
+    groups: messaging.groupSummaries(),
     messages: Object.fromEntries([...messaging.messages.entries()]),
     online: messaging.online,
   });
@@ -131,17 +135,20 @@ export async function addFriend(name: string, note: string): Promise<string | nu
   return error;
 }
 
+/** 发送消息（1:1 与群统一入口；群会话键 group:<groupId>，M3-S11）。 */
 export async function sendMessage(did: string, text: string): Promise<void> {
-  await messaging?.sendMessage(did, text);
+  if (did.startsWith("group:")) await messaging?.sendGroupMessage(did.slice("group:".length), text);
+  else await messaging?.sendMessage(did, text);
 }
 
-/** 发送图片/文件（≤8MB，端到端加密后走 CAS 块）。 */
+/** 发送图片/文件（≤8MB，端到端加密后走 CAS 块；群附件 CID/CK 进组内密文）。 */
 export async function sendAttachment(
   did: string,
   file: { data: Uint8Array; name: string; mime: string },
   kind: "image" | "file",
 ): Promise<void> {
-  await messaging?.sendAttachment(did, file, kind);
+  if (did.startsWith("group:")) await messaging?.sendGroupAttachment(did.slice("group:".length), file, kind);
+  else await messaging?.sendAttachment(did, file, kind);
 }
 
 /** UI 打开会话时调用：触发对端的 read 回执（受隐私开关控制）。 */
@@ -174,6 +181,31 @@ export async function fetchAttachment(
 
 export function openChat(did: string | null): void {
   setState({ activeDid: did });
+}
+
+// ---------- 群组（FR-6.1/6.2，M3-S11 UI 接入用） ----------
+
+/** 建群并邀请（成员须为已建立会话的联系人）；成功后打开群聊。 */
+export async function createGroupAndInvite(name: string, memberDids: string[]): Promise<string | null> {
+  if (!messaging) return "应用尚未就绪";
+  const err = await messaging.createGroupAndInvite(name, memberDids);
+  if (err === null) setState({ activeDid: null }); // 群键在 sync 后由 UI 打开
+  return err;
+}
+
+/** 邀请成员（群主）。 */
+export async function addGroupMember(groupId: string, memberDid: string): Promise<string | null> {
+  return (await messaging?.addMemberToGroup(groupId, memberDid)) ?? "应用尚未就绪";
+}
+
+/** 移除成员（群主，FR-6.2 断读：被移除者不可达新 epoch 的信箱与密钥）。 */
+export async function removeGroupMember(groupId: string, memberDid: string): Promise<string | null> {
+  return (await messaging?.removeMemberFromGroup(groupId, memberDid)) ?? "应用尚未就绪";
+}
+
+/** 群消息的实际发送者展示名（无名字时退回短 DID）。 */
+export function contactNameOf(targetDid: string): string | null {
+  return messaging?.contacts.get(targetDid)?.name ?? null;
 }
 
 export function setNotice(notice: string | null): void {

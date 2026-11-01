@@ -6,6 +6,7 @@ import { openChat, useAppState } from "../lib/app";
 import AddFriendModal from "../components/AddFriendModal";
 import ChatPanel from "../components/ChatPanel";
 import ContactSidebar from "../components/ContactSidebar";
+import CreateGroupModal from "../components/CreateGroupModal";
 import ProfileModal from "../components/ProfileModal";
 import RecoveryRequestBanner from "../components/RecoveryRequestBanner";
 
@@ -13,15 +14,21 @@ export default function MainPage() {
   const state = useAppState();
   const [showAddFriend, setShowAddFriend] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
+  const [showCreateGroup, setShowCreateGroup] = useState(false);
 
   return (
     <div className="main-root">
       <RecoveryRequestBanner />
       <div className={`main-layout${state.activeDid !== null ? " chat-open" : ""}`}>
-        <ContactSidebar onAddFriend={() => setShowAddFriend(true)} onOpenProfile={() => setShowProfile(true)} />
+        <ContactSidebar
+          onAddFriend={() => setShowAddFriend(true)}
+          onOpenProfile={() => setShowProfile(true)}
+          onCreateGroup={() => setShowCreateGroup(true)}
+        />
         <ChatPanel onBack={() => openChat(null)} onAddFriend={() => setShowAddFriend(true)} />
         {showAddFriend && <AddFriendModal onClose={() => setShowAddFriend(false)} />}
         {showProfile && <ProfileModal onClose={() => setShowProfile(false)} />}
+        {showCreateGroup && <CreateGroupModal onClose={() => setShowCreateGroup(false)} />}
       </div>
     </div>
   );

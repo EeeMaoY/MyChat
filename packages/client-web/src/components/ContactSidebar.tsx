@@ -1,4 +1,4 @@
-/** 会话列表侧栏：我的状态、联系人列表、加好友与"我"入口。 */
+/** 会话列表侧栏：我的状态、联系人/群组列表、加好友/建群与"我"入口。 */
 import { openChat, useAppState } from "../lib/app";
 import type { ChatMessage } from "../lib/messaging";
 
@@ -7,6 +7,7 @@ import { formatListTime, shortDid, truncate } from "./format";
 interface Props {
   onAddFriend: () => void;
   onOpenProfile: () => void;
+  onCreateGroup: () => void;
 }
 
 /** 取某会话最后一条消息（noUncheckedIndexedAccess 下需判空）。 */
@@ -16,7 +17,7 @@ function lastMessage(messages: Record<string, ChatMessage[]>, did: string): Chat
   return list[list.length - 1];
 }
 
-export default function ContactSidebar({ onAddFriend, onOpenProfile }: Props) {
+export default function ContactSidebar({ onAddFriend, onOpenProfile, onCreateGroup }: Props) {
   const state = useAppState();
 
   return (
@@ -30,7 +31,24 @@ export default function ContactSidebar({ onAddFriend, onOpenProfile }: Props) {
       </header>
 
       <nav className="contact-list">
-        {state.contacts.length === 0 && (
+        {/* 群组（M3-S11）：键 group:<groupId>，与联系人统一会话路由 */}
+        {state.groups.map((g) => {
+          const chatKey = `group:${g.groupId}`;
+          const last = lastMessage(state.messages, chatKey);
+          const active = state.activeDid === chatKey;
+          return (
+            <button key={chatKey} className={`contact-item${active ? " active" : ""}`} onClick={() => openChat(chatKey)}>
+              <span className="contact-row">
+                <span className="contact-name">👥 {g.name}</span>
+                <span className="contact-time">{last !== undefined ? formatListTime(last.at) : ""}</span>
+              </span>
+              <span className="contact-preview">
+                {last !== undefined ? truncate(last.text, 30) : `（${g.memberCount} 位成员）`}
+              </span>
+            </button>
+          );
+        })}
+        {state.contacts.length === 0 && state.groups.length === 0 && (
           <p className="contact-empty">
             还没有联系人。
             <br />
@@ -59,9 +77,14 @@ export default function ContactSidebar({ onAddFriend, onOpenProfile }: Props) {
       </nav>
 
       <footer className="sidebar-foot">
-        <button className="btn-primary btn-block" onClick={onAddFriend}>
-          ➕ 加好友
-        </button>
+        <div className="sidebar-foot-row">
+          <button className="btn-primary btn-block" onClick={onAddFriend}>
+            ➕ 加好友
+          </button>
+          <button className="btn-ghost btn-block" onClick={onCreateGroup} disabled={state.contacts.length < 2}>
+            👥 建群
+          </button>
+        </div>
       </footer>
     </aside>
   );

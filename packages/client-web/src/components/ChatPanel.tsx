@@ -69,6 +69,9 @@ export default function ChatPanel({ onBack, onAddFriend }: Props) {
 
   const list = did !== null ? state.messages[did] : undefined;
   const contact = did !== null ? state.contacts.find((c) => c.did === did) : undefined;
+  // 群会话（M3-S11）：activeDid = group:<groupId>
+  const isGroupChat = did !== null && did.startsWith("group:");
+  const group = isGroupChat && did !== null ? state.groups.find((g) => `group:${g.groupId}` === did) : undefined;
 
   function scrollToBottom(): void {
     const el = listRef.current;
@@ -213,8 +216,12 @@ export default function ChatPanel({ onBack, onAddFriend }: Props) {
           ←
         </button>
         <div className="chat-peer">
-          <span className="chat-peer-name">{contact?.name ?? shortDid(did)}</span>
-          <span className="chat-peer-did">{shortDid(did)}</span>
+          <span className="chat-peer-name">
+            {isGroupChat ? `👥 ${group?.name ?? "群聊"}` : (contact?.name ?? shortDid(did ?? ""))}
+          </span>
+          <span className="chat-peer-did">
+            {isGroupChat ? `${group?.memberCount ?? 0} 位成员 · 端到端群加密` : shortDid(did ?? "")}
+          </span>
         </div>
         <span className="chat-e2ee">🔒 端到端加密</span>
       </header>
@@ -229,8 +236,13 @@ export default function ChatPanel({ onBack, onAddFriend }: Props) {
             );
           }
           const dir = m.direction === "in" ? "in" : "out";
+          const senderName =
+            isGroupChat && m.direction === "in" && m.senderDid !== undefined
+              ? (state.contacts.find((c) => c.did === m.senderDid)?.name ?? `${m.senderDid.slice(0, 10)}…`)
+              : null;
           return (
             <div key={m.id} className={`msg-row msg-${dir}`}>
+              {senderName !== null && <span className="msg-sender">{senderName}</span>}
               {renderBody(m, dir)}
               <span className="msg-meta">
                 <span className="msg-time">{formatClock(m.at)}</span>

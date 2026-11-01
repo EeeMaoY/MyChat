@@ -678,6 +678,20 @@ textarea {
   margin-top: 2px;
 }
 
+/* 群消息署名（M3-S11）：in 气泡上方的发送者名 */
+.msg-sender {
+  display: block;
+  font-size: 12px;
+  color: var(--text-dim);
+  margin: 0 0 2px 4px;
+}
+
+/* 侧栏底部双按钮（加好友 / 建群） */
+.sidebar-foot-row {
+  display: flex;
+  gap: 8px;
+}
+
 .msg-meta .msg-time {
   margin-top: 0;
 }
