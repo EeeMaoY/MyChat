@@ -38,6 +38,7 @@ import {
 } from "@mychat/core";
 
 import { startDevNode, type DevNode } from "../server";
+import { registerDeviceCert } from "./helpers-device";
 
 const EPOCH_MS = 60_000;
 const PAD_SIZES = [256, 1024, 16_384, 131_072] as const;
@@ -60,6 +61,8 @@ interface Prekeys {
   spk: KeyPair;
   /** 本地池：id → 密钥对 */
   pool: Map<number, KeyPair>;
+  /** 本机设备 dkId（池分槽所属，M2-S10） */
+  dkId: string;
 }
 
 async function register(identity: Identity, name: string, poolSize = 5): Promise<Prekeys> {
@@ -75,7 +78,8 @@ async function register(identity: Identity, name: string, poolSize = 5): Promise
   const first = generateX25519KeyPair();
   const firstId = deriveOpkId(first.publicKey);
   const bundle = issuePreKeyBundle(identity, spk, { ...first, id: firstId }, 3_600_000);
-  const put = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(identity.did)}`, {
+  const dkId = await registerDeviceCert(base, identity);
+  const put = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(identity.did)}?device=${encodeURIComponent(dkId)}`, {
     method: "PUT",
     body: Buffer.from(encodePreKeyBundle(bundle)),
   });
@@ -89,13 +93,13 @@ async function register(identity: Identity, name: string, poolSize = 5): Promise
     pool.set(id, k);
     rest.push({ id, public: base58Encode(k.publicKey) });
   }
-  const add = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(identity.did)}/opks`, {
+  const add = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(identity.did)}/opks?device=${encodeURIComponent(dkId)}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ opks: rest }),
   });
   expect(add.status).toBe(201);
-  return { spk, pool };
+  return { spk, pool, dkId };
 }
 
 async function fetchBundleBytes(did: string): Promise<Uint8Array> {
@@ -104,8 +108,8 @@ async function fetchBundleBytes(did: string): Promise<Uint8Array> {
   return new Uint8Array(await res.arrayBuffer());
 }
 
-async function consumeOpkRemote(did: string, opkId: number): Promise<void> {
-  const res = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(did)}/opk/${opkId}`, {
+async function consumeOpkRemote(did: string, opkId: number, dkId: string): Promise<void> {
+  const res = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(did)}/opk/${opkId}?device=${encodeURIComponent(dkId)}`, {
     method: "DELETE",
   });
   expect(res.status).toBe(200);
@@ -196,7 +200,9 @@ async function handshake(initiator: Party, responder: Party, firstText: string):
   const usedId = msg.x3dh.opkId;
   const opkKey = responder.prekeys.pool.get(usedId);
   if (!opkKey) {
-    const stats = await (await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(responder.identity.did)}/stats`)).json();
+    const stats = await (
+      await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(responder.identity.did)}/stats?device=${encodeURIComponent(responder.prekeys.dkId)}`)
+    ).json();
     throw new Error(`OPK #${usedId} 不在本地池（本地 keys: ${[...responder.prekeys.pool.keys()].join(",")}；节点 stats: ${JSON.stringify(stats)}）`);
   }
   const { session: sessionB } = acceptSession(
@@ -207,7 +213,7 @@ async function handshake(initiator: Party, responder: Party, firstText: string):
     initiator.identity.did,
   );
   responder.prekeys.pool.delete(usedId);
-  await consumeOpkRemote(responder.identity.did, usedId);
+  await consumeOpkRemote(responder.identity.did, usedId, responder.prekeys.dkId);
   responder.sessions.set(initiator.identity.did, sessionB); // M2-S9 替换语义
   return { initiatorSession: session, responderSession: sessionB };
 }

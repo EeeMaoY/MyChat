@@ -11,10 +11,15 @@ import {
   createIdentity,
   decodePreKeyBundle,
   deriveOpkId,
+  encodeDeviceCertificateJson,
+  encodeDeviceRevocationJson,
   encodePreKeyBundle,
+  generateEd25519KeyPair,
   generateX25519KeyPair,
   issuePreKeyBundle,
   ktVerifyInclusion,
+  makeDeviceCertificate,
+  makeDeviceRevocation,
   makeUserNameRecord,
   randomBytes,
   base58Encode,
@@ -22,6 +27,7 @@ import {
 
 import { startDevNode, type DevNode } from "../server";
 import { envelopeToJson } from "../wire";
+import { registerDeviceCert } from "./helpers-device";
 
 let node: DevNode;
 let base: string;
@@ -70,16 +76,18 @@ describe("Registry（验签 + 重名拒绝 + KT 联动）", () => {
     expect(Buffer.from(got.signature, "base64")).toEqual(Buffer.from(record.signature));
   });
 
-  it("OPK 池（M2-S9）：池化分发、一次性语义、消耗确认、低水位统计", async () => {
+  it("OPK 池（M2-S9/S10）：按设备分槽、池化分发、一次性语义、消耗确认、低水位统计", async () => {
     const { identity } = await registerUser("pooluser");
     const did = identity.did;
     const enc = (did2: string) => encodeURIComponent(did2);
+    const dkId = await registerDeviceCert(base, identity);
+    const devQs = `?device=${encodeURIComponent(dkId)}`;
 
     // 先上传 bundle 模板（分发组装的前置；registerUser 只注册不传 bundle）
     const templateSpk = generateX25519KeyPair();
     const templateOpk = generateX25519KeyPair();
     const template = issuePreKeyBundle(identity, templateSpk, { ...templateOpk, id: deriveOpkId(templateOpk.publicKey) }, 3_600_000);
-    const templatePut = await fetch(`${base}/v0/registry/bundle/${enc(did)}`, {
+    const templatePut = await fetch(`${base}/v0/registry/bundle/${enc(did)}${devQs}`, {
       method: "PUT",
       body: Buffer.from(encodePreKeyBundle(template)),
     });
@@ -94,13 +102,13 @@ describe("Registry（验签 + 重名拒绝 + KT 联动）", () => {
     const uniqueIds = new Set(opks.map((o) => o.id));
     expect(uniqueIds.size).toBe(opks.length);
 
-    const add = await fetch(`${base}/v0/registry/bundle/${enc(did)}/opks`, {
+    const add = await fetch(`${base}/v0/registry/bundle/${enc(did)}/opks${devQs}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ opks }),
     });
     expect(add.status).toBe(201);
-    const statsAfterAdd = (await (await fetch(`${base}/v0/registry/bundle/${enc(did)}/stats`)).json()) as {
+    const statsAfterAdd = (await (await fetch(`${base}/v0/registry/bundle/${enc(did)}/stats${devQs}`)).json()) as {
       available: number;
     };
     expect(statsAfterAdd.available).toBe(4); // 模板 OPK 1 + 补充 3
@@ -114,7 +122,7 @@ describe("Registry（验签 + 重名拒绝 + KT 联动）", () => {
       expect(seenIds).not.toContain(decoded.opkId);
       seenIds.push(decoded.opkId);
     }
-    const statsAfterIssue = (await (await fetch(`${base}/v0/registry/bundle/${enc(did)}/stats`)).json()) as {
+    const statsAfterIssue = (await (await fetch(`${base}/v0/registry/bundle/${enc(did)}/stats${devQs}`)).json()) as {
       available: number;
       issued: number;
     };
@@ -126,16 +134,27 @@ describe("Registry（验签 + 重名拒绝 + KT 联动）", () => {
     expect(reuse.status).toBe(200);
 
     // 消耗确认：DELETE 后池与 issued 同步移除
-    const del = await fetch(`${base}/v0/registry/bundle/${enc(did)}/opk/${seenIds[0]}`, { method: "DELETE" });
+    const del = await fetch(`${base}/v0/registry/bundle/${enc(did)}/opk/${seenIds[0]}${devQs}`, { method: "DELETE" });
     const delBody = (await del.json()) as { consumed: boolean };
     expect(delBody.consumed).toBe(true);
-    const statsAfterConsume = (await (await fetch(`${base}/v0/registry/bundle/${enc(did)}/stats`)).json()) as {
+    const statsAfterConsume = (await (await fetch(`${base}/v0/registry/bundle/${enc(did)}/stats${devQs}`)).json()) as {
       available: number;
       issued: number;
     };
     // 语义确认：DELETE 移除的是已发出的 OPK（issued 与池同步收缩）；池中剩余全部处于已发状态
     expect(statsAfterConsume.issued).toBe(3);
     expect(statsAfterConsume.available).toBe(0);
+
+    // 未登记设备的写操作被拒（M2-S10：bundle/池须挂靠有效设备）
+    const stranger = createIdentity();
+    const rogueSpk = generateX25519KeyPair();
+    const rogueOpk = generateX25519KeyPair();
+    const rogue = issuePreKeyBundle(stranger, rogueSpk, { ...rogueOpk, id: deriveOpkId(rogueOpk.publicKey) }, 3_600_000);
+    const roguePut = await fetch(`${base}/v0/registry/bundle/${enc(stranger.did)}?device=${encodeURIComponent(base58Encode(randomBytes(32)))}`, {
+      method: "PUT",
+      body: Buffer.from(encodePreKeyBundle(rogue)),
+    });
+    expect(roguePut.status).toBe(403);
   });
 
   it("bundle 分发：有效上传 201 / 查回一致 / 篡改与坏 DID 被拒 / 缺失 404", async () => {
@@ -144,9 +163,10 @@ describe("Registry（验签 + 重名拒绝 + KT 联动）", () => {
     const opk = generateX25519KeyPair();
     const bundle = issuePreKeyBundle(identity, spk, { ...opk, id: deriveOpkId(opk.publicKey) }, 3_600_000);
     const encoded = encodePreKeyBundle(bundle);
+    const dkId = await registerDeviceCert(base, identity);
     void decodePreKeyBundle; // 保持导入面一致（解码校验在节点内完成）
 
-    const put = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(identity.did)}`, {
+    const put = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(identity.did)}?device=${encodeURIComponent(dkId)}`, {
       method: "PUT",
       body: Buffer.from(encoded),
     });
@@ -158,20 +178,108 @@ describe("Registry（验签 + 重名拒绝 + KT 联动）", () => {
     // 篡改一个字节 → 节点验签拒绝
     const tampered = encoded.slice();
     tampered[40]! ^= 1;
-    const putBad = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(identity.did)}`, {
+    const putBad = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(identity.did)}?device=${encodeURIComponent(dkId)}`, {
       method: "PUT",
       body: Buffer.from(tampered),
     });
     expect(putBad.status).toBe(400);
 
     // DID 格式非法
-    const putBadDid = await fetch(`${base}/v0/registry/bundle/not-a-did`, { method: "PUT", body: Buffer.from(encoded) });
+    const putBadDid = await fetch(`${base}/v0/registry/bundle/not-a-did?device=${encodeURIComponent(dkId)}`, { method: "PUT", body: Buffer.from(encoded) });
     expect(putBadDid.status).toBe(400);
 
     // 未上传 bundle 的合法格式 DID（格式非法才是 400）
     const stranger = createIdentity();
     const missing = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(stranger.did)}`);
     expect(missing.status).toBe(404);
+  });
+
+  it("设备注册表（M2-S10）：登记/KT 锚定/吊销停发/伪造拒绝/列表折叠", async () => {
+    const { identity } = await registerUser("devuser");
+    const did = identity.did;
+    const enc = encodeURIComponent;
+
+    // 登记 → 201 + KT device-add
+    const dkA = await registerDeviceCert(base, identity, "设备A");
+    const list1 = (await (await fetch(`${base}/v0/registry/devices/${enc(did)}`)).json()) as {
+      devices: { certificate: { dkId: string; label: string }; revoked: boolean; expired: boolean }[];
+    };
+    expect(list1.devices).toHaveLength(1);
+    expect(list1.devices[0]!.certificate.dkId).toBe(dkA);
+    expect(list1.devices[0]!.certificate.label).toBe("设备A");
+    expect(list1.devices[0]!.revoked).toBe(false);
+    const kt1 = (await (await fetch(`${base}/v0/kt/list/${enc(did)}`)).json()) as { events: { type: string }[] };
+    expect(kt1.events.map((e) => e.type)).toContain("device-add");
+
+    // 第二台设备登记 → 列表 2 台
+    const dkB = await registerDeviceCert(base, identity, "设备B");
+    const list2 = (await (await fetch(`${base}/v0/registry/devices/${enc(did)}`)).json()) as {
+      devices: { certificate: { dkId: string } }[];
+    };
+    expect(list2.devices).toHaveLength(2);
+
+    // bundle 挂靠设备 A；吊销 A 后分发不再可用（停发），KT device-revoke 锚定
+    const spk = generateX25519KeyPair();
+    const opk = generateX25519KeyPair();
+    const bundle = issuePreKeyBundle(identity, spk, { ...opk, id: deriveOpkId(opk.publicKey) }, 3_600_000);
+    const put = await fetch(`${base}/v0/registry/bundle/${enc(did)}?device=${enc(dkA)}`, {
+      method: "PUT",
+      body: Buffer.from(encodePreKeyBundle(bundle)),
+    });
+    expect(put.status).toBe(201);
+
+    const revocation = makeDeviceRevocation(identity.ikEd.privateKey, did, dkA);
+    const revoke = await fetch(`${base}/v0/registry/devices/${enc(did)}/${enc(dkA)}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        revocation: JSON.parse(encodeDeviceRevocationJson(revocation)),
+      }),
+    });
+    expect(revoke.status).toBe(200);
+    const revokeBody = (await revoke.json()) as { changed: boolean };
+    expect(revokeBody.changed).toBe(true);
+
+    // 分发轮询跳过已吊销设备 A：B 无 bundle → 404（停发语义）
+    const afterRevoke = await fetch(`${base}/v0/registry/bundle/${enc(did)}`);
+    expect(afterRevoke.status).toBe(404);
+
+    const kt2 = (await (await fetch(`${base}/v0/kt/list/${enc(did)}`)).json()) as { events: { type: string }[] };
+    expect(kt2.events.map((e) => e.type)).toContain("device-revoke");
+
+    // 重复吊销幂等（changed=false，不再重复锚定 KT）
+    const again = await fetch(`${base}/v0/registry/devices/${enc(did)}/${enc(dkA)}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ revocation: JSON.parse(encodeDeviceRevocationJson(revocation)) }),
+    });
+    expect(again.status).toBe(200);
+    expect(((await again.json()) as { changed: boolean }).changed).toBe(false);
+
+    // 伪造吊销（攻击者 IK 签名）被拒
+    const attacker = createIdentity();
+    const fake = makeDeviceRevocation(attacker.ikEd.privateKey, did, dkB);
+    const fakeRevoke = await fetch(`${base}/v0/registry/devices/${enc(did)}/${enc(dkB)}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ revocation: JSON.parse(encodeDeviceRevocationJson(fake)) }),
+    });
+    expect(fakeRevoke.status).toBe(400);
+    // B 未被吊销
+    const list3 = (await (await fetch(`${base}/v0/registry/devices/${enc(did)}`)).json()) as {
+      devices: { certificate: { dkId: string }; revoked: boolean }[];
+    };
+    expect(list3.devices.find((d) => d.certificate.dkId === dkB)!.revoked).toBe(false);
+
+    // 伪造凭证（冒用他人 DID）登记被拒
+    const rogue = createIdentity();
+    const rogueCert = makeDeviceCertificate(rogue.ikEd.privateKey, rogue.did, generateEd25519KeyPair().publicKey, "冒名", 3_600_000);
+    const roguePut = await fetch(`${base}/v0/registry/devices/${enc(did)}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ certificate: JSON.parse(encodeDeviceCertificateJson({ ...rogueCert, did })) }),
+    });
+    expect(roguePut.status).toBe(400);
   });
 
   it("重名注册被拒（409）", async () => {

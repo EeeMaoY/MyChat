@@ -31,6 +31,7 @@ import {
 } from "@mychat/core";
 
 import { startDevNode, type DevNode } from "../server";
+import { registerDeviceCert } from "./helpers-device";
 
 const EPOCH_MS = 60_000;
 const PAD_SIZES = [256, 1024, 16_384, 131_072] as const;
@@ -68,7 +69,8 @@ async function registerClient(identity: Identity, name: string): Promise<ClientK
   const spk = generateX25519KeyPair();
   const opk = generateX25519KeyPair();
   const bundle = issuePreKeyBundle(identity, spk, { ...opk, id: deriveOpkId(opk.publicKey) }, 3_600_000);
-  const put = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(identity.did)}`, {
+  const dkId = await registerDeviceCert(base, identity);
+  const put = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(identity.did)}?device=${encodeURIComponent(dkId)}`, {
     method: "PUT",
     body: Buffer.from(encodePreKeyBundle(bundle)),
   });

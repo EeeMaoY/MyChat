@@ -21,10 +21,19 @@ import { envelopeFromJson, envelopeToJson, type EnvelopeJson } from "./wire.ts";
 import { RelayHub, type RelayDelivery, type RelayNotification } from "./relay.ts";
 import { appendEvent, createKTLogStore, ktLogInclusionProof, ktLogRoot, listEvents, type KTLogStore } from "./ktlog.ts";
 import {
+  activeDeviceEntries,
+  createDeviceRegistryStore,
+  listDeviceEntries,
+  registerDevice,
+  revokeDevice,
+  type DeviceRegistryStore,
+} from "./devices.ts";
+import {
   assembleBundle,
   consumeOpk,
   createBundleStore,
   createRegistryStore,
+  dropDeviceMaterials,
   opkPoolStats,
   putBundle,
   putOpks,
@@ -54,6 +63,7 @@ interface NodeState {
   storage: StorageStore;
   registry: RegistryStore;
   bundles: BundleStore;
+  devices: DeviceRegistryStore;
   recovery: Map<string, string>;
   ktlog: KTLogStore;
   relay: RelayHub;
@@ -65,6 +75,7 @@ export function startDevNode(opts: { port?: number; host?: string } = {}): Promi
     storage: createStorageStore(),
     registry: createRegistryStore(),
     bundles: createBundleStore(),
+    devices: createDeviceRegistryStore(),
     recovery: new Map(),
     ktlog: createKTLogStore(),
     relay: new RelayHub(),
@@ -74,7 +85,7 @@ export function startDevNode(opts: { port?: number; host?: string } = {}): Promi
     // CORS：dev 节点是零信任公共基础设施，浏览器客户端可从任意 origin 访问
     // （生产多节点部署时仍按本语义开放——节点不作鉴权裁决）
     res.setHeader("access-control-allow-origin", "*");
-    res.setHeader("access-control-allow-methods", "GET, POST, PUT, OPTIONS");
+    res.setHeader("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS");
     res.setHeader("access-control-allow-headers", "content-type");
     if (req.method === "OPTIONS") {
       res.writeHead(204);
@@ -147,7 +158,66 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
       return sendJson(res, 200, { record: serializeRecord(record) });
     }
 
-    // ----- 预密钥束分发（Registry 角色扩展，设计报告 §5.2）-----
+    // ----- 设备注册表（M2-S10 FR-1.4：凭证登记/吊销/列表，设计报告 §4.2）-----
+    if (parts[1] === "registry" && parts[2] === "devices" && typeof parts[3] === "string") {
+      const did = decodeURIComponent(parts[3]);
+      try {
+        didToEd25519PublicKey(did);
+      } catch {
+        return sendError(res, 400, "DID 格式非法");
+      }
+      if (req.method === "PUT") {
+        const body = await readJson(req);
+        if (typeof body.certificate !== "object" || body.certificate === null) {
+          return sendError(res, 400, "设备凭证格式非法");
+        }
+        const json = JSON.stringify(body.certificate);
+        const result = registerDevice(state.devices, did, json);
+        if (!result.ok) return sendError(res, 400, result.error);
+        // KT 联动：设备生命周期锚定透明日志（联系人可本地折叠核验）
+        appendEvent(state.ktlog, {
+          did,
+          type: "device-add",
+          payload: new Uint8Array(Buffer.from(json, "utf8")),
+        });
+        return sendJson(res, 201, { ok: true, dkId: result.certificate.dkId });
+      }
+      if (req.method === "DELETE" && typeof parts[4] === "string") {
+        const dkId = decodeURIComponent(parts[4]);
+        const body = await readJson(req);
+        if (typeof body.revocation !== "object" || body.revocation === null) {
+          return sendError(res, 400, "吊销声明格式非法");
+        }
+        const json = JSON.stringify(body.revocation);
+        const result = revokeDevice(state.devices, did, json);
+        if (!result.ok) return sendError(res, 400, result.error);
+        if (result.changed) {
+          // 吊销即停发：删除该设备的 bundle 模板与 OPK 池 + KT 锚定
+          dropDeviceMaterials(state.bundles, did, dkId);
+          appendEvent(state.ktlog, {
+            did,
+            type: "device-revoke",
+            payload: new Uint8Array(Buffer.from(json, "utf8")),
+          });
+        }
+        return sendJson(res, 200, { ok: true, changed: result.changed });
+      }
+      if (req.method === "GET") {
+        const now = Date.now();
+        const devices = listDeviceEntries(state.devices, did).map((entry) => {
+          const certificate = JSON.parse(entry.certificate) as Record<string, unknown>;
+          return {
+            certificate,
+            revoked: entry.revokedAt !== null,
+            revokedAt: entry.revokedAt,
+            expired: typeof certificate.expiresAt === "number" && certificate.expiresAt <= now,
+          };
+        });
+        return sendJson(res, 200, { devices });
+      }
+    }
+
+    // ----- 预密钥束分发（Registry 角色扩展，设计报告 §5.2；M2-S10 起按设备分槽）-----
     if (parts[1] === "registry" && parts[2] === "bundle" && typeof parts[3] === "string") {
       const did = decodeURIComponent(parts[3]);
       // DID 格式校验（防任意键污染）
@@ -155,6 +225,15 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
         didToEd25519PublicKey(did);
       } catch {
         return sendError(res, 400, "DID 格式非法");
+      }
+      // 写操作须指向有效设备（凭证已登记、未吊销、未过期）
+      const requestedDevice = url.searchParams.get("device") ?? "";
+      const activeDevices = activeDeviceEntries(state.devices, did, Date.now()).map((d) => d.dkId);
+      if (
+        (req.method === "PUT" || req.method === "POST" || req.method === "DELETE") &&
+        !activeDevices.includes(requestedDevice)
+      ) {
+        return sendError(res, 403, "设备未登记或已失效（先登记设备凭证）");
       }
       if (req.method === "PUT") {
         const body = await readBody(req);
@@ -168,9 +247,9 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
         if (bundle.did !== did || !verifyPreKeyBundle(bundle)) {
           return sendError(res, 400, "bundle 验签失败或 DID 不匹配");
         }
-        putBundle(state.bundles, did, new Uint8Array(body));
-        // bundle 上传同时把其中的 OPK 入池（M2-S9：池化分发）
-        putOpks(state.bundles, did, [
+        putBundle(state.bundles, did, requestedDevice, new Uint8Array(body));
+        // bundle 上传同时把其中的 OPK 入该设备池（M2-S9 池化 + M2-S10 分槽）
+        putOpks(state.bundles, did, requestedDevice, [
           { id: bundle.opkId, public: base58Encode(bundle.opkPublic) },
         ]);
         return sendJson(res, 201, { ok: true });
@@ -183,6 +262,7 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
           putOpks(
             state.bundles,
             did,
+            requestedDevice,
             body.opks.map((o: { id: unknown; public: unknown }) => ({
               id: Number(o.id),
               public: String(o.public ?? ""),
@@ -191,19 +271,21 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
         } catch (err) {
           return sendError(res, 400, err instanceof Error ? err.message : "OPK 非法");
         }
-        return sendJson(res, 201, { ok: true, stats: opkPoolStats(state.bundles, did) });
+        return sendJson(res, 201, { ok: true, stats: opkPoolStats(state.bundles, did, requestedDevice) });
       }
       if (req.method === "DELETE" && parts[4] === "opk" && typeof parts[5] === "string") {
         const opkId = Number(parts[5]);
-        const consumed = Number.isInteger(opkId) ? consumeOpk(state.bundles, did, opkId) : false;
-        return sendJson(res, 200, { consumed, stats: opkPoolStats(state.bundles, did) });
+        const consumed = Number.isInteger(opkId) ? consumeOpk(state.bundles, did, requestedDevice, opkId) : false;
+        return sendJson(res, 200, { consumed, stats: opkPoolStats(state.bundles, did, requestedDevice) });
       }
       if (req.method === "GET" && parts[4] === "stats") {
-        return sendJson(res, 200, opkPoolStats(state.bundles, did));
+        if (!activeDevices.includes(requestedDevice)) return sendError(res, 403, "设备未登记或已失效");
+        return sendJson(res, 200, opkPoolStats(state.bundles, did, requestedDevice));
       }
       if (req.method === "GET") {
-        const assembled = assembleBundle(state.bundles, did);
-        if (!assembled) return sendError(res, 404, "bundle 不存在");
+        // 分发：节点在有效设备集内确定性轮询（多设备自然负载均衡；吊销设备已出局）
+        const assembled = assembleBundle(state.bundles, did, activeDevices);
+        if (!assembled) return sendError(res, 404, "bundle 不存在（或无有效设备）");
         res.writeHead(200, { "content-type": "application/octet-stream" });
         res.end(Buffer.from(assembled.encoded));
         return;

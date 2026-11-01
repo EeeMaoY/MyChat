@@ -4,6 +4,10 @@
  * 信任边界（设计报告 §2.3）：节点验证记录签名后仅作"防垃圾准入"，
  * 映射的密码学可信性由客户端自行验签（SR-5）——节点拒绝无效记录，
  * 但客户端永远不因"节点接受了"而采信。
+ *
+ * M2-S10 多设备：bundle 与 OPK 池均按设备（dkId）分槽存储；分发的设备选择
+ * 由调用方提供有效设备集（DeviceRegistry 折叠），节点内做确定性 round-robin——
+ * 多设备在线时联系人分发自然负载均衡，吊销设备的槽位随吊销一并删除。
  */
 import type { UserNameRecord } from "@mychat/core";
 import {
@@ -47,37 +51,69 @@ export function resolveName(store: RegistryStore, name: string): UserNameRecord 
 
 /**
  * 预密钥束分发（Registry 角色的 M2 扩展，设计报告 §5.2 + M2 计划 §3.1）：
- * - bundle 主体（IK-x/SPK 材料 + 签名）按 DID 存"当前版本"；
- * - OPK 池独立存储；GET 时节点从池中挑一个未发出的 OPK 组装进 bundle 返回，
- *   返回即标记已发（服务端一次性语义，Signal 规范）；
+ * - bundle 主体（IK-x/SPK 材料 + 签名）按 (did, dkId) 存"当前版本"；
+ * - OPK 池独立存储且按设备分槽；GET 时节点从有效设备中轮询挑一台、再从其池中
+ *   挑一个未发出的 OPK 组装进 bundle 返回，返回即标记已发（服务端一次性语义）；
  * - 响应方 accept 成功后经 DELETE 确认消耗；池空时复用已发 OPK（一次性退化为
- *   已知边界，协议规范 §10）。
+ *   已知边界，协议规范 §10）；
+ * - 吊销设备时调用方删除其槽位（dropDeviceMaterials），分发自动落到其余设备。
  */
 export interface BundleStore {
-  /** did → 编码 bundle（模板，含最近一次上传的 OPK 字段——分发时会被池中 OPK 替换） */
-  bundles: Map<string, Uint8Array>;
-  /** did → (opkId → opkPublic base58) */
-  opkPools: Map<string, Map<number, string>>;
-  /** did → 已随 bundle 发出、尚未被 accept 确认消耗的 opkId 集 */
-  issued: Map<string, Set<number>>;
+  /** did → (dkId → 编码 bundle 模板，含最近一次上传的 OPK 字段——分发时会被池中 OPK 替换) */
+  bundles: Map<string, Map<string, Uint8Array>>;
+  /** did → (dkId → (opkId → opkPublic base58)) */
+  opkPools: Map<string, Map<string, Map<number, string>>>;
+  /** did → (dkId → 已随 bundle 发出、尚未被 accept 确认消耗的 opkId 集) */
+  issued: Map<string, Map<string, Set<number>>>;
+  /** did → 上次分发的 dkId（确定性 round-robin 指针） */
+  dispatchCursor: Map<string, string>;
 }
 
 export function createBundleStore(): BundleStore {
-  return { bundles: new Map(), opkPools: new Map(), issued: new Map() };
+  return {
+    bundles: new Map(),
+    opkPools: new Map(),
+    issued: new Map(),
+    dispatchCursor: new Map(),
+  };
 }
 
-export function putBundle(store: BundleStore, did: string, bundle: Uint8Array): void {
-  if (bundle.length === 0 || bundle.length > 1024) throw new Error("bundle 长度非法");
-  store.bundles.set(did, bundle);
-}
-
-/** 上传 OPK 入池（幂等；池上限 256，防滥用）。 */
-export function putOpks(store: BundleStore, did: string, opks: { id: number; public: string }[]): void {
-  let pool = store.opkPools.get(did);
-  if (!pool) {
-    pool = new Map();
-    store.opkPools.set(did, pool);
+/** did → (dkId → 容器) 的三层取用：返回该设备名下的容器，不存在则按 create 新建。 */
+function deviceSlot<V>(outer: Map<string, Map<string, V>>, did: string, dkId: string, create: () => V): V {
+  let inner = outer.get(did);
+  if (!inner) {
+    inner = new Map();
+    outer.set(did, inner);
   }
+  let slot = inner.get(dkId);
+  if (!slot) {
+    slot = create();
+    inner.set(dkId, slot);
+  }
+  return slot;
+}
+
+function devicePool(store: BundleStore, did: string, dkId: string): Map<number, string> {
+  return deviceSlot(store.opkPools, did, dkId, () => new Map());
+}
+
+function deviceIssued(store: BundleStore, did: string, dkId: string): Set<number> {
+  return deviceSlot(store.issued, did, dkId, () => new Set());
+}
+
+export function putBundle(store: BundleStore, did: string, dkId: string, bundle: Uint8Array): void {
+  if (bundle.length === 0 || bundle.length > 1024) throw new Error("bundle 长度非法");
+  let inner = store.bundles.get(did);
+  if (!inner) {
+    inner = new Map();
+    store.bundles.set(did, inner);
+  }
+  inner.set(dkId, bundle);
+}
+
+/** 上传 OPK 入指定设备的池（幂等；每设备池上限 256，防滥用）。 */
+export function putOpks(store: BundleStore, did: string, dkId: string, opks: { id: number; public: string }[]): void {
+  const pool = devicePool(store, did, dkId);
   for (const opk of opks) {
     if (!Number.isInteger(opk.id) || opk.id < 0) throw new Error("opkId 非法");
     if (typeof opk.public !== "string" || opk.public.length === 0 || opk.public.length > 128) {
@@ -92,19 +128,37 @@ export interface AssembledBundle {
   encoded: Uint8Array;
   /** 本次分发使用的 OPK（池空时为 null，bundle 保留模板 OPK 字段） */
   usedOpkId: number | null;
+  /** 本次分发命中的设备 */
+  device: string | null;
 }
 
-/** 组装分发：模板 + 池中一个未发出的 OPK；返回即标记已发。 */
-export function assembleBundle(store: BundleStore, did: string): AssembledBundle | undefined {
-  const template = store.bundles.get(did);
-  if (!template) return undefined;
-  const pool = store.opkPools.get(did);
-  const issued = store.issued.get(did) ?? new Set<number>();
-  if (!store.issued.has(did)) store.issued.set(did, issued);
+/**
+ * 组装分发：在有效设备集内确定性轮询选一台（按 issuedAt 排序、指针推进），
+ * 再从该设备池中挑一个未发出的 OPK；返回即标记已发。
+ * activeDevices 为空或无任何设备槽位时返回 undefined（404 语义）。
+ */
+export function assembleBundle(
+  store: BundleStore,
+  did: string,
+  activeDevices: string[],
+): AssembledBundle | undefined {
+  const deviceBundles = store.bundles.get(did);
+  if (!deviceBundles || deviceBundles.size === 0) return undefined;
+  const candidates = activeDevices.filter((dkId) => deviceBundles.has(dkId));
+  if (candidates.length === 0) return undefined;
+
+  const last = store.dispatchCursor.get(did);
+  const index = last ? (candidates.indexOf(last) + 1) % candidates.length : 0;
+  const device = candidates[index]!;
+  store.dispatchCursor.set(did, device);
+
+  const template = deviceBundles.get(device)!;
+  const pool = devicePool(store, did, device);
+  const issued = deviceIssued(store, did, device);
 
   let usedOpkId: number | null = null;
   let assembled = template;
-  if (pool && pool.size > 0) {
+  if (pool.size > 0) {
     const fresh = [...pool.entries()].find(([id]) => !issued.has(id));
     const [opkId, opkPublic] = fresh ?? [...pool.entries()][0]!;
     try {
@@ -118,29 +172,38 @@ export function assembleBundle(store: BundleStore, did: string): AssembledBundle
       assembled = template;
     }
   }
-  return { encoded: assembled, usedOpkId };
+  return { encoded: assembled, usedOpkId, device };
 }
 
-/** 响应方 accept 成功后的消耗确认：从池与 issued 中移除。 */
-export function consumeOpk(store: BundleStore, did: string, opkId: number): boolean {
-  const pool = store.opkPools.get(did);
-  const issued = store.issued.get(did);
-  const had = pool?.delete(opkId) ?? false;
-  issued?.delete(opkId);
+/** 响应方 accept 成功后的消耗确认：从设备池与 issued 中移除。 */
+export function consumeOpk(store: BundleStore, did: string, dkId: string, opkId: number): boolean {
+  const pool = devicePool(store, did, dkId);
+  const issued = deviceIssued(store, did, dkId);
+  const had = pool.delete(opkId);
+  issued.delete(opkId);
   return had;
 }
 
-/** 池水位（客户端低水位补充用）。 */
-export function opkPoolStats(store: BundleStore, did: string): { available: number; issued: number; poolKeys: number[]; issuedKeys: number[] } {
-  const pool = store.opkPools.get(did);
-  const issued = store.issued.get(did);
-  const issuedKeys = issued ? [...issued] : [];
-  const issuedCount = issuedKeys.filter((id) => pool?.has(id)).length;
+/** 设备池水位（客户端低水位补充用）。 */
+export function opkPoolStats(
+  store: BundleStore,
+  did: string,
+  dkId: string,
+): { available: number; issued: number; poolKeys: number[]; issuedKeys: number[] } {
+  const pool = devicePool(store, did, dkId);
+  const issued = deviceIssued(store, did, dkId);
+  const issuedKeys = [...issued].filter((id) => pool.has(id));
   return {
-    available: (pool?.size ?? 0) - issuedCount,
-    issued: issuedCount,
-    poolKeys: pool ? [...pool.keys()] : [],
+    available: pool.size - issuedKeys.length,
+    issued: issuedKeys.length,
+    poolKeys: [...pool.keys()],
     issuedKeys,
   };
 }
 
+/** 吊销联动：删除该设备的 bundle 模板与 OPK 池（停发该设备的所有预密钥材料）。 */
+export function dropDeviceMaterials(store: BundleStore, did: string, dkId: string): void {
+  store.bundles.get(did)?.delete(dkId);
+  store.opkPools.get(did)?.delete(dkId);
+  store.issued.get(did)?.delete(dkId);
+}
