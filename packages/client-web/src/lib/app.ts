@@ -9,10 +9,12 @@ import { useSyncExternalStore } from "react";
 
 import { base58Decode, createIdbKVStore, decryptAttachment, type KVStore } from "@mychat/core";
 
-import { Messaging, groupChatKey, type ChatMessage, type Contact, type GroupSummary } from "./messaging";
+import { Messaging, groupChatKey, type ChatMessage, type Contact, type GroupSummary, type MomentItem } from "./messaging";
 import { NodeApi } from "./node-api";
 
 export type Phase = "loading" | "welcome" | "creating" | "set-name" | "main";
+/** 主区视图：会话（默认）/ 动态时间线（M3-S12）。 */
+export type MainView = "chat" | "timeline";
 
 export interface AppState {
   phase: Phase;
@@ -20,11 +22,13 @@ export interface AppState {
   myName: string | null;
   contacts: Contact[];
   groups: GroupSummary[];
+  moments: MomentItem[];
   messages: Record<string, ChatMessage[]>;
   online: boolean;
   notice: string | null;
   /** 当前打开的会话：1:1 = 对方 DID；群组 = group:<groupId>（M3-S11） */
-  activeDid: string | null;
+  activeDid: null | string;
+  view: MainView;
 }
 
 let kv: KVStore | null = null;
@@ -37,10 +41,12 @@ let state: AppState = {
   myName: null,
   contacts: [],
   groups: [],
+  moments: [],
   messages: {},
   online: true,
   notice: null,
   activeDid: null,
+  view: "chat",
 };
 
 const listeners = new Set<() => void>();
@@ -77,6 +83,14 @@ function syncFromMessaging(): void {
     messages: Object.fromEntries([...messaging.messages.entries()]),
     online: messaging.online,
   });
+  void refreshMoments();
+}
+
+/** 时间线快照刷新（kv 异步扫描；随每次状态同步触发）。 */
+async function refreshMoments(): Promise<void> {
+  if (!messaging) return;
+  const items = await messaging.listTimeline();
+  setState({ moments: items });
 }
 
 /** 启动：加载身份或进入欢迎流程。 */
@@ -180,7 +194,36 @@ export async function fetchAttachment(
 }
 
 export function openChat(did: string | null): void {
-  setState({ activeDid: did });
+  setState({ activeDid: did, view: "chat" });
+}
+
+// ---------- 动态（FR-4.1/4.2/4.4，M3-S12 UI 接入用） ----------
+
+export function openTimeline(): void {
+  setState({ view: "timeline" });
+  void refreshMoments();
+}
+
+export function openChatView(): void {
+  setState({ view: "chat" });
+}
+
+/** 发布动态（文字 + 可选图片，≤8MB）。 */
+export async function publishMoment(text: string, file?: { data: Uint8Array; name: string; mime: string }): Promise<void> {
+  if (!messaging) throw new Error("应用尚未就绪");
+  await messaging.publishMoment(text, file);
+}
+
+/** 删除我的动态（墓碑 + 物理删块；已缓存副本无法强制删除，UI 如实告知）。 */
+export async function deleteMoment(cid: string): Promise<void> {
+  if (!messaging) throw new Error("应用尚未就绪");
+  await messaging.deleteMoment(cid);
+}
+
+/** 评论好友动态（v1 仅作者可见）。 */
+export async function commentMoment(authorDid: string, cid: string, text: string): Promise<void> {
+  if (!messaging) throw new Error("应用尚未就绪");
+  await messaging.commentMoment(authorDid, cid, text);
 }
 
 // ---------- 群组（FR-6.1/6.2，M3-S11 UI 接入用） ----------

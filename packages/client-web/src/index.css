@@ -692,6 +692,65 @@ textarea {
   gap: 8px;
 }
 
+/* 动态时间线（M3-S12） */
+.timeline-composer {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px;
+  border-bottom: 1px solid var(--border, #e3e5e8);
+}
+
+.timeline-list {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+}
+
+.moment-card {
+  border: 1px solid var(--border, #e3e5e8);
+  border-radius: 10px;
+  padding: 10px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.moment-card.deleted {
+  opacity: 0.55;
+}
+
+.moment-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.moment-head .btn-ghost {
+  margin-left: auto;
+}
+
+.moment-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.moment-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.moment-comment {
+  margin: 0;
+  font-size: 13px;
+  color: var(--text-dim, #6b7280);
+  border-top: 1px dashed var(--border, #e3e5e8);
+  padding-top: 6px;
+}
+
 .msg-meta .msg-time {
   margin-top: 0;
 }

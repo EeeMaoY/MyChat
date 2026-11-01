@@ -8,6 +8,7 @@ interface Props {
   onAddFriend: () => void;
   onOpenProfile: () => void;
   onCreateGroup: () => void;
+  onOpenTimeline: () => void;
 }
 
 /** 取某会话最后一条消息（noUncheckedIndexedAccess 下需判空）。 */
@@ -17,7 +18,7 @@ function lastMessage(messages: Record<string, ChatMessage[]>, did: string): Chat
   return list[list.length - 1];
 }
 
-export default function ContactSidebar({ onAddFriend, onOpenProfile, onCreateGroup }: Props) {
+export default function ContactSidebar({ onAddFriend, onOpenProfile, onCreateGroup, onOpenTimeline }: Props) {
   const state = useAppState();
 
   return (
@@ -31,6 +32,16 @@ export default function ContactSidebar({ onAddFriend, onOpenProfile, onCreateGro
       </header>
 
       <nav className="contact-list">
+        <button
+          className={`contact-item${state.view === "timeline" ? " active" : ""}`}
+          onClick={onOpenTimeline}
+        >
+          <span className="contact-row">
+            <span className="contact-name">📱 动态</span>
+            <span className="contact-time">{state.moments.length > 0 ? `${state.moments.length}` : ""}</span>
+          </span>
+          <span className="contact-preview">好友圈时间线（端到端加密）</span>
+        </button>
         {/* 群组（M3-S11）：键 group:<groupId>，与联系人统一会话路由 */}
         {state.groups.map((g) => {
           const chatKey = `group:${g.groupId}`;

@@ -251,6 +251,12 @@ export class NodeApi {
     return new Uint8Array(await res.arrayBuffer());
   }
 
+  /** 物理删块（FR-4.4 动态删除的物理增强，M3-S12；幂等）。 */
+  async deleteBlock(cid: string): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/v0/storage/blocks/${encodeURIComponent(cid)}`, { method: "DELETE" });
+    if (!res.ok) await readError(res);
+  }
+
   // ----- Relay: WS 唤醒订阅 -----
 
   /**

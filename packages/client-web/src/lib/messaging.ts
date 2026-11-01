@@ -28,6 +28,7 @@ import {
   applyGroupKeysPayload,
   createGroup,
   createGroupView,
+  createMomentBlock,
   decodeDeviceCertificateJson,
   decodeGroupStateJson,
   deriveOpkId,
@@ -41,6 +42,7 @@ import {
   activeDeviceIds,
   foldDeviceEvents,
   generateEd25519KeyPair,
+  generateMomentKey,
   generateSenderKeys,
   generateX25519KeyPair,
   groupMailboxId,
@@ -51,12 +53,16 @@ import {
   makeGroupKeysPayload,
   makeEnvelope,
   makeUserNameRecord,
+  momentFeedId,
+  openFeedEntry,
   openGroupMessage,
   openGuardianShare,
   openIdentityWrap,
+  openMomentBlock,
   padClassForLength,
   recoverRk,
   removeGroupMember,
+  sealFeedEntry,
   sealGuardianShare,
   sealGroupMessage,
   serializeIdentity,
@@ -142,6 +148,18 @@ export interface GroupSummary {
   amOwner: boolean;
 }
 
+/** 动态条目（UI 快照；本地缓存形态，M3-S12）。 */
+export interface MomentItem {
+  authorDid: string;
+  cid: string;
+  text: string;
+  at: number;
+  attachment?: AttachmentMeta;
+  /** 墓碑后本地标记（缓存副本保留但 UI 不渲染内容，FR-4.4 固有边界） */
+  deleted?: boolean;
+  comments: { fromDid: string; text: string; at: number }[];
+}
+
 /** GroupKeysPayload 的客户端持久化 JSON 形态（kv 存储；senderKeys base58）。 */
 export interface GroupKeysPayloadJson {
   v: 1;
@@ -168,7 +186,10 @@ type SessionPayload =
   | { v: 1; type: "recovery-request"; did: string }
   | { v: 1; type: "recovery-share"; did: string; shareX: number; shareY: string }
   /** 群组（FR-6.1，M3-S11）：群密钥分发载荷（经 1:1 DR 会话，被移除者不可达） */
-  | { v: 1; type: "group-keys"; payload: GroupKeysPayloadJson };
+  | { v: 1; type: "group-keys"; payload: GroupKeysPayloadJson }
+  /** 动态（FR-4.x，M3-S12）：好友圈密钥分发 / 动态评论（仅作者可见） */
+  | { v: 1; type: "circle-keys"; momentKey: string }
+  | { v: 1; type: "moment-comment"; cid: string; text: string };
 
 /** 开放备份包格式（FR-7.2；明文 JSON，导出文件的保管责任在用户，UX-7 披露） */
 interface ExportBundle {
@@ -201,6 +222,7 @@ const K_OPK_POOL = "opk-pool";
 const K_MSG_SEQ = "msgseq";
 const K_DEVICE_DK = "device-dk";
 const K_DEVICE_CERT = "device-cert";
+const K_MOMENT_KEY = "moment-key";
 const SETTING_READ_RECEIPTS = "setting:read-receipts";
 /** OPK 池目标规模与低水位（M2 计划 §3.1：低于水位自动补充）。 */
 export const OPK_POOL_TARGET = 20;
@@ -278,6 +300,8 @@ export class Messaging {
     await m.loadKeyMaterial();
     await m.loadSocialState();
     await m.ensureDevice();
+    await m.ensureMomentKey();
+    void m.distributeMomentKeys().catch(() => undefined); // 启动补发（网络失败下轮重试）
     return m;
   }
 
@@ -569,6 +593,8 @@ export class Messaging {
       await this.saveContact(record.did);
       await this.saveSession(record.did);
       await this.appendLocalMessage(record.did, "out", note || "（握手请求已发送）", "handshake");
+      // 新好友：分发我的好友圈密钥（对方的 key 由对方主动发来，M3-S12）
+      void this.distributeMomentKeys().catch(() => undefined);
       this.emit();
       return null;
     } catch (err) {
@@ -786,6 +812,157 @@ export class Messaging {
         }
       }
       await this.advanceCursor(mailboxId, next, envelopes.length > 0);
+    }
+  }
+
+  // ----- 动态（FR-4.1/4.2/4.4，M3-S12：EDS-min 好友圈，M3 计划 §6） -----
+
+  /** 我的好友圈密钥（base58；v1 不轮换，边界见 M3 计划 §6.1）。 */
+  myMomentKey: string | null = null;
+
+  /** 确保好友圈密钥存在（load/createNew 调用；缺失即生成）。 */
+  async ensureMomentKey(): Promise<void> {
+    if (this.myMomentKey !== null) return;
+    const raw = await this.deps.kv.get(K_MOMENT_KEY);
+    if (raw) {
+      this.myMomentKey = bytesToUtf8(raw);
+      return;
+    }
+    const key = base58Encode(generateMomentKey());
+    this.myMomentKey = key;
+    await this.deps.kv.put(K_MOMENT_KEY, utf8ToBytes(key));
+  }
+
+  /**
+   * 把我的好友圈密钥发给尚未持有它的联系人（加好友后与启动补发共用；
+   * 对方 key 已存在则跳过——v1 不接受对方 key 更新，防重放换钥）。
+   */
+  async distributeMomentKeys(): Promise<void> {
+    await this.ensureMomentKey();
+    for (const did of this.contacts.keys()) {
+      const held = await this.deps.kv.get(`momentkey:${did}`);
+      if (held !== undefined) continue;
+      const session = this.sessions.get(did);
+      if (!session) continue;
+      try {
+        const wire = sessionSend(session, utf8ToBytes(JSON.stringify({ v: 1, type: "circle-keys", momentKey: this.myMomentKey! } satisfies SessionPayload)));
+        const mailboxId = sessionMailbox(session, "send", Date.now());
+        await this.deps.api.mailboxAppend(mailboxId, this.seal(wire, mailboxId));
+      } catch {
+        /* 单个分发失败不阻塞其余（下轮补发） */
+      }
+    }
+  }
+
+  /** 发布动态（文字 + 可选图片）：内容块独立密钥 → CAS → 日志条目（好友圈密钥加密）。 */
+  async publishMoment(text: string, file?: { data: Uint8Array; name: string; mime: string }): Promise<void> {
+    if (this.myMomentKey === null) throw new Error("好友圈未就绪");
+    let attachment: MomentItem["attachment"];
+    if (file) {
+      if (file.data.length > 8 * 1024 * 1024) throw new Error("附件超过 8MB 上限");
+      const img = encryptAttachment(file.data);
+      await this.deps.api.putBlock(img.cid, img.ciphertext);
+      attachment = { cid: img.cid, contentKey: base58Encode(img.contentKey), nonce: base58Encode(img.nonce), name: file.name, size: file.data.length, mime: file.mime };
+    }
+    const created = createMomentBlock({ v: 1, text, ...(attachment ? { attachment } : {}) });
+    await this.deps.api.putBlock(created.cid, created.block);
+    const entry = { v: 1 as const, type: "post" as const, cid: created.cid, contentKey: created.contentKey, nonce: created.nonce, at: Date.now() };
+    const feedId = momentFeedId(base58Decode(this.myMomentKey));
+    await this.deps.api.mailboxAppend(feedId, this.seal(sealFeedEntry(base58Decode(this.myMomentKey), entry), feedId));
+    // 本地立即入时间线（作者视角）
+    const item: MomentItem = { authorDid: this.identity.did, cid: created.cid, text, at: entry.at, ...(attachment ? { attachment } : {}), comments: [] };
+    await this.deps.kv.put(`moment:${this.identity.did}:${created.cid}`, utf8ToBytes(JSON.stringify(item)));
+    this.emit();
+  }
+
+  /** 删除动态（FR-4.4）：墓碑条目 + 物理删块；已缓存副本无法强制删除（如实披露）。 */
+  async deleteMoment(cid: string): Promise<void> {
+    if (this.myMomentKey === null) throw new Error("好友圈未就绪");
+    const key = base58Decode(this.myMomentKey);
+    const feedId = momentFeedId(key);
+    const tombstone = { v: 1 as const, type: "delete" as const, cid, at: Date.now() };
+    await this.deps.api.mailboxAppend(feedId, this.seal(sealFeedEntry(key, tombstone), feedId));
+    try {
+      await this.deps.api.deleteBlock(cid);
+    } catch {
+      /* 块可能已被删（幂等） */
+    }
+    // 本地标记（缓存保留，UI 不渲染内容）
+    const kvKey = `moment:${this.identity.did}:${cid}`;
+    const raw = await this.deps.kv.get(kvKey);
+    if (raw) {
+      const item = JSON.parse(bytesToUtf8(raw)) as MomentItem;
+      await this.deps.kv.put(kvKey, utf8ToBytes(JSON.stringify({ ...item, deleted: true })));
+    }
+    this.emit();
+  }
+
+  /** 评论好友动态（v1：经 1:1 会话仅作者可见，M3 计划 §6.5）。 */
+  async commentMoment(authorDid: string, cid: string, text: string): Promise<void> {
+    const session = this.sessions.get(authorDid);
+    if (!session) throw new Error("与该作者的会话不存在");
+    const wire = sessionSend(session, utf8ToBytes(JSON.stringify({ v: 1, type: "moment-comment", cid, text } satisfies SessionPayload)));
+    const mailboxId = sessionMailbox(session, "send", Date.now());
+    await this.deps.api.mailboxAppend(mailboxId, this.seal(wire, mailboxId));
+    this.emit();
+  }
+
+  /** 时间线（本地聚合：我的 + 持有其好友圈密钥的联系人的动态，按时间倒序）。 */
+  async listTimeline(): Promise<MomentItem[]> {
+    const out: MomentItem[] = [];
+    for (const key of await this.deps.kv.keys("moment:")) {
+      const raw = await this.deps.kv.get(key);
+      if (!raw) continue;
+      try {
+        out.push(JSON.parse(bytesToUtf8(raw)) as MomentItem);
+      } catch {
+        /* 损坏条目跳过 */
+      }
+    }
+    return out.sort((a, b) => b.at - a.at);
+  }
+
+  /** 拉取全部好友的动态日志（时间线增量；post 取块解密，delete 应用墓碑）。 */
+  private async pollMomentFeeds(): Promise<void> {
+    for (const did of this.contacts.keys()) {
+      const keyRaw = await this.deps.kv.get(`momentkey:${did}`);
+      if (keyRaw === undefined) continue;
+      const theirKey = base58Decode(bytesToUtf8(keyRaw));
+      const feedId = momentFeedId(theirKey);
+      const cursor = await this.cursorFor(feedId);
+      const { envelopes, cursor: next } = await this.deps.api.mailboxFetch(feedId, cursor);
+      for (const envelope of envelopes) {
+        try {
+          const entry = openFeedEntry(theirKey, stripPadding(envelope.payload));
+          const kvKey = `moment:${did}:${entry.cid}`;
+          if (entry.type === "delete") {
+            const raw = await this.deps.kv.get(kvKey);
+            if (raw) {
+              const item = JSON.parse(bytesToUtf8(raw)) as MomentItem;
+              await this.deps.kv.put(kvKey, utf8ToBytes(JSON.stringify({ ...item, deleted: true })));
+            }
+            continue;
+          }
+          if (entry.contentKey === undefined || entry.nonce === undefined) continue;
+          // 幂等：重复条目跳过
+          if (await this.deps.kv.get(kvKey)) continue;
+          const block = await this.deps.api.getBlock(entry.cid);
+          if (!block) continue; // 作者已物理删除（墓碑可能尚未拉到）
+          const payload = openMomentBlock(block, entry.contentKey, entry.nonce);
+          const item: MomentItem = {
+            authorDid: did,
+            cid: entry.cid,
+            text: payload.text,
+            at: entry.at,
+            ...(payload.attachment ? { attachment: payload.attachment } : {}),
+            comments: [],
+          };
+          await this.deps.kv.put(kvKey, utf8ToBytes(JSON.stringify(item)));
+        } catch {
+          // 非好友密文/篡改/块缺失：安全丢弃（SR-4 语义）
+        }
+      }
+      await this.advanceCursor(feedId, next, envelopes.length > 0);
     }
   }
 
@@ -1240,7 +1417,7 @@ export class Messaging {
 
   // ----- 接收（FR-5.1 在线直投 + 离线信箱） -----
 
-  /** 拉取发现信箱 + 全部会话的接收信箱 + 全部群信箱（覆盖三 epoch 窗口，防轮换漏收）。 */
+  /** 拉取发现信箱 + 全部会话的接收信箱 + 全部群信箱 + 好友圈动态日志（三 epoch 窗口防轮换漏收）。 */
   async poll(): Promise<void> {
     try {
       await this.pollDiscovery();
@@ -1248,6 +1425,7 @@ export class Messaging {
         await this.pollSession(did);
       }
       await this.pollGroups();
+      await this.pollMomentFeeds();
       this.online = true;
     } catch {
       this.online = false;
@@ -1411,6 +1589,26 @@ export class Messaging {
     if (payload.type === "group-keys") {
       // 群密钥分发（经 1:1 DR 会话）：验签后入群/刷新 epoch（M3-S11）
       await this.handleGroupKeys(payload.payload);
+      return null;
+    }
+    if (payload.type === "circle-keys") {
+      // 好友圈密钥（M3-S12）：已持有则忽略（v1 不接受对方换钥，防重放换钥）
+      const existing = await this.deps.kv.get(`momentkey:${did}`);
+      if (existing === undefined && typeof payload.momentKey === "string") {
+        await this.deps.kv.put(`momentkey:${did}`, utf8ToBytes(payload.momentKey));
+      }
+      return null;
+    }
+    if (payload.type === "moment-comment") {
+      // 动态评论（仅作者可见）：挂载到我的对应动态
+      const kvKey = `moment:${this.identity.did}:${payload.cid}`;
+      const raw = await this.deps.kv.get(kvKey);
+      if (raw && typeof payload.text === "string") {
+        const item = JSON.parse(bytesToUtf8(raw)) as MomentItem;
+        item.comments.push({ fromDid: did, text: payload.text, at: Date.now() });
+        await this.deps.kv.put(kvKey, utf8ToBytes(JSON.stringify(item)));
+        this.emit();
+      }
       return null;
     }
     if (payload.type === "chat") {
