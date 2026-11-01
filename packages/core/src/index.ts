@@ -7,7 +7,7 @@
  * 模块地图（docs/MVP范围与里程碑计划.md §5.1）：
  *   protocol  服务域四接口（IRelay/IStorage/IRegistry/IKTLog）—— client 与 node 的协议边界
  *   crypto    密码原语封装（全库唯一允许接触 @noble/* 的位置）
- *   codec     base58 / 字节工具
+ *   codec     base58 / base64 / 字节工具
  *   identity  IK/DK 分层、DID、预密钥束、用户名签名记录
  *   signal    X3DH + Double Ratchet + 1:1 会话
  *   envelope  伪地址 / 填充 / 时间桶 / 信封编解码
@@ -26,4 +26,5 @@ export * from "./attachment/index.ts";
 export * from "./ssss/index.ts";
 export * from "./ktmerkle/index.ts";
 export * from "./recovery/index.ts";
+export * from "./devices/index.ts";
 
