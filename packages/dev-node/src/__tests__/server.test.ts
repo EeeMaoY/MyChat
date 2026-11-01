@@ -314,6 +314,41 @@ describe("Registry（验签 + 重名拒绝 + KT 联动）", () => {
     expect(events[0]!.did).toBe(identity.did);
   });
 
+  it("KT 前缀一致性：叶哈希增量端点与客户端核验互操作（M3-S11 捎带）", async () => {
+    // 三个用户注册 → 日志 3 个事件；先取"旧时点"材料，再注册第 4 个制造增量
+    for (const name of ["cons1", "cons2", "cons3"]) await registerUser(name);
+    const before = (await (await fetch(`${base}/v0/kt/leaves?after=-1`)).json()) as { from: number; upTo: number; leafHashes: string[] };
+    expect(before.from).toBe(0);
+    expect(before.leafHashes.length).toBeGreaterThanOrEqual(3);
+    const oldRoot = ((await (await fetch(`${base}/v0/kt/root`)).json()) as { root: string }).root;
+
+    await registerUser("cons4");
+    const after = (await (await fetch(`${base}/v0/kt/leaves?after=${before.upTo - 1}`)).json()) as { from: number; upTo: number; leafHashes: string[] };
+    expect(after.from).toBe(before.upTo);
+    expect(after.leafHashes).toHaveLength(1);
+    const newRoot = ((await (await fetch(`${base}/v0/kt/root`)).json()) as { root: string }).root;
+
+    // 客户端核验：前缀 + 增量重算双根比对
+    const { base58Decode, ktVerifyConsistency } = await import("@mychat/core");
+    expect(
+      ktVerifyConsistency(
+        before.leafHashes.map((h) => base58Decode(h)),
+        after.leafHashes.map((h) => base58Decode(h)),
+        oldRoot,
+        newRoot,
+      ),
+    ).toBe(true);
+    // 篡改任一叶哈希 → 一致性破坏
+    expect(
+      ktVerifyConsistency(
+        before.leafHashes.map((h) => base58Decode(h)),
+        [base58Decode(before.leafHashes[0]!)],
+        oldRoot,
+        newRoot,
+      ),
+    ).toBe(false);
+  });
+
   it("KT Merkle：root/proof 端点与客户端核验互操作（FR-1.6 M1）", async () => {
     // 三个用户注册 → 日志 3 个事件
     const ids = [];

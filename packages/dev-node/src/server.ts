@@ -346,6 +346,13 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
     if (req.method === "GET" && parts[1] === "kt" && parts[2] === "list" && typeof parts[3] === "string") {
       return sendJson(res, 200, { events: listEvents(state.ktlog, decodeURIComponent(parts[3])).map(serializeKTEvent) });
     }
+    if (req.method === "GET" && url.pathname === "/v0/kt/leaves") {
+      // 前缀一致性材料（M3-S11 捎带）：index > after 的叶哈希（base58，日志顺序）
+      const after = Number(url.searchParams.get("after") ?? "-1");
+      const from = Number.isInteger(after) && after >= -1 ? after + 1 : 0;
+      const leaves = state.ktlog.leaves.slice(from).map((l) => base58Encode(l));
+      return sendJson(res, 200, { from, upTo: state.ktlog.leaves.length, leafHashes: leaves });
+    }
     if (req.method === "POST" && url.pathname === "/v0/kt/append") {
       const body = await readJson(req);
       const event = appendEvent(state.ktlog, {
