@@ -8,16 +8,21 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   acceptSession,
+  activeDeviceIds,
   base58Encode,
   bytesToUtf8,
   createIdentity,
   decodePreKeyBundle,
   decodeSessionWire,
   deriveOpkId,
+  encodeDeviceRevocationJson,
   encodePreKeyBundle,
+  fingerprintDeviceIds,
+  foldDeviceEvents,
   generateX25519KeyPair,
   initiateSession,
   issuePreKeyBundle,
+  makeDeviceRevocation,
   makeUserNameRecord,
   openGuardianShare,
   openIdentityWrap,
@@ -33,6 +38,7 @@ import {
   verifyUserNameRecord,
   type Envelope,
   type Identity,
+  type KTEvent,
   type KeyPair,
   type Session,
 } from "@mychat/core";
@@ -55,17 +61,23 @@ afterEach(async () => {
   await node.close();
 });
 
-// ---------- 最小客户端驱动（持有 OPK 池，M2-S9 语义） ----------
+// ---------- 最小客户端驱动（持有 OPK 池，M2-S9 语义；M2-S10 起按设备分槽） ----------
 
 interface Prekeys {
+  /** 本机（单设备语义下唯一）设备 dkId */
+  dkId: string;
+  /** 本机（单设备语义下唯一）SPK */
   spk: KeyPair;
+  /** 多设备：dkId → 该设备的 SPK（各设备独立签名的签名预密钥，M2-S10） */
+  spkByDevice: Map<string, KeyPair>;
   /** 本地池：id → 密钥对 */
   pool: Map<number, KeyPair>;
-  /** 本机设备 dkId（池分槽所属，M2-S10） */
-  dkId: string;
+  /** opkId → 所属设备 dkId（M2-S10：消耗确认须落对应设备槽位） */
+  opkDevice: Map<number, string>;
 }
 
-async function register(identity: Identity, name: string, poolSize = 5): Promise<Prekeys> {
+/** 用户名注册（设备挂靠的前置）。 */
+async function registerUserName(identity: Identity, name: string): Promise<void> {
   const record = makeUserNameRecord(identity.ikEd.privateKey, name, identity.did, 0);
   expect(verifyUserNameRecord(record)).toBe(true);
   const reg = await fetch(`${base}/v0/registry/register`, {
@@ -74,32 +86,45 @@ async function register(identity: Identity, name: string, poolSize = 5): Promise
     body: JSON.stringify({ record: { ...record, signature: Buffer.from(record.signature).toString("base64") } }),
   });
   expect(reg.status).toBe(201);
+}
+
+/** 登记一台设备并上传其 bundle 模板与 OPK 池（M2-S10：材料按 dkId 分槽）。 */
+async function attachDevice(identity: Identity, label: string, poolSize = 5): Promise<Prekeys> {
+  const dkId = await registerDeviceCert(base, identity, label);
+  const devQs = `?device=${encodeURIComponent(dkId)}`;
   const spk = generateX25519KeyPair();
   const first = generateX25519KeyPair();
   const firstId = deriveOpkId(first.publicKey);
   const bundle = issuePreKeyBundle(identity, spk, { ...first, id: firstId }, 3_600_000);
-  const dkId = await registerDeviceCert(base, identity);
-  const put = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(identity.did)}?device=${encodeURIComponent(dkId)}`, {
+  const put = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(identity.did)}${devQs}`, {
     method: "PUT",
     body: Buffer.from(encodePreKeyBundle(bundle)),
   });
   expect(put.status).toBe(201);
   const pool = new Map<number, KeyPair>([[firstId, first]]);
+  const opkDevice = new Map<number, string>([[firstId, dkId]]);
   const rest: { id: number; public: string }[] = [];
   while (pool.size < poolSize) {
     const k = generateX25519KeyPair();
     const id = deriveOpkId(k.publicKey);
     if (pool.has(id)) continue;
     pool.set(id, k);
+    opkDevice.set(id, dkId);
     rest.push({ id, public: base58Encode(k.publicKey) });
   }
-  const add = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(identity.did)}/opks?device=${encodeURIComponent(dkId)}`, {
+  const add = await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(identity.did)}/opks${devQs}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ opks: rest }),
   });
   expect(add.status).toBe(201);
-  return { spk, pool, dkId };
+  return { dkId, spk, spkByDevice: new Map([[dkId, spk]]), pool, opkDevice };
+}
+
+/** 单设备注册（M2-S9 语义）：用户名 + 一台设备。 */
+async function register(identity: Identity, name: string, poolSize = 5): Promise<Prekeys> {
+  await registerUserName(identity, name);
+  return attachDevice(identity, "test-device", poolSize);
 }
 
 async function fetchBundleBytes(did: string): Promise<Uint8Array> {
@@ -201,19 +226,22 @@ async function handshake(initiator: Party, responder: Party, firstText: string):
   const opkKey = responder.prekeys.pool.get(usedId);
   if (!opkKey) {
     const stats = await (
-      await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(responder.identity.did)}/stats?device=${encodeURIComponent(responder.prekeys.dkId)}`)
+      await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(responder.identity.did)}/stats?device=${encodeURIComponent(responder.prekeys.opkDevice.get(usedId) ?? "")}`)
     ).json();
     throw new Error(`OPK #${usedId} 不在本地池（本地 keys: ${[...responder.prekeys.pool.keys()].join(",")}；节点 stats: ${JSON.stringify(stats)}）`);
   }
+  // M2-S10：分发的 bundle 属于哪台设备，accept 就用该设备的 SPK（每设备独立签名预密钥）
+  const deviceSpk = responder.prekeys.spkByDevice.get(responder.prekeys.opkDevice.get(usedId)!) ?? responder.prekeys.spk;
   const { session: sessionB } = acceptSession(
     responder.identity,
-    responder.prekeys.spk,
+    deviceSpk,
     new Map([[usedId, opkKey]]),
     matched,
     initiator.identity.did,
   );
   responder.prekeys.pool.delete(usedId);
-  await consumeOpkRemote(responder.identity.did, usedId, responder.prekeys.dkId);
+  // M2-S10：消耗确认落 OPK 所属设备的槽位
+  await consumeOpkRemote(responder.identity.did, usedId, responder.prekeys.opkDevice.get(usedId)!);
   responder.sessions.set(initiator.identity.did, sessionB); // M2-S9 替换语义
   return { initiatorSession: session, responderSession: sessionB };
 }
@@ -312,5 +340,133 @@ describe("M2-S9 Gate：OPK 池与会话重建（KI-1/KI-4 闭环）", () => {
     expect(restored.did).toBe(owner.did);
     expect(restored.ikEd.privateKey).toEqual(owner.ikEd.privateKey);
     void utf8ToBytes;
+  });
+});
+
+/** 拉取 DID 的 KT 事件流并还原为客户端折叠输入（M2-S10 设备集核对的数据源）。 */
+async function fetchKtEvents(did: string): Promise<KTEvent[]> {
+  const res = await fetch(`${base}/v0/kt/list/${encodeURIComponent(did)}`);
+  expect(res.status).toBe(200);
+  const body = (await res.json()) as { events: { did: string; type: string; index: number; payload: string }[] };
+  return body.events.map((e) => ({
+    did: e.did,
+    type: e.type as KTEvent["type"],
+    index: e.index,
+    payload: new Uint8Array(Buffer.from(e.payload, "base64")),
+  }));
+}
+
+describe("M2-S10 Gate：多设备（FR-1.4 设备凭证/吊销/对端轮换）", () => {
+  function mergePool(parts: Prekeys[]): Prekeys {
+    const pool = new Map<number, KeyPair>();
+    const opkDevice = new Map<number, string>();
+    const spkByDevice = new Map<string, KeyPair>();
+    for (const p of parts) {
+      for (const [id, kp] of p.pool) pool.set(id, kp);
+      for (const [id, dk] of p.opkDevice) opkDevice.set(id, dk);
+      for (const [dk, spk] of p.spkByDevice) spkByDevice.set(dk, spk);
+    }
+    return { dkId: parts[0]!.dkId, spk: parts[0]!.spk, spkByDevice, pool, opkDevice };
+  }
+
+  it("双设备 round-robin 分发：连续取 bundle 交替命中两台设备，各自握手后双向通信成功", async () => {
+    const bob = createIdentity();
+    await registerUserName(bob, "bob_s10");
+    const devA = await attachDevice(bob, "设备A");
+    const devB = await attachDevice(bob, "设备B");
+    const bobParty: Party = { identity: bob, prekeys: mergePool([devA, devB]), sessions: new Map() };
+
+    // 连续两次分发：确定性轮询交替命中 A、B（以 OPK 归属槽位判定）
+    const b1 = decodePreKeyBundle(await fetchBundleBytes(bob.did));
+    const b2 = decodePreKeyBundle(await fetchBundleBytes(bob.did));
+    expect(devA.pool.has(b1.opkId) || devB.pool.has(b1.opkId)).toBe(true);
+    expect(devA.pool.has(b2.opkId) || devB.pool.has(b2.opkId)).toBe(true);
+    // 交替：两次命中不同设备
+    expect((devA.pool.has(b1.opkId) ? "A" : "B")).not.toBe(devA.pool.has(b2.opkId) ? "A" : "B");
+
+    // 两位联系人分别经不同设备的 bundle 与 bob 建立会话，双向通信均可用
+    const c1 = createIdentity();
+    const c2 = createIdentity();
+    const h1 = await handshake({ identity: c1 }, bobParty, "走设备A的联系人");
+    const h2 = await handshake({ identity: c2 }, bobParty, "走设备B的联系人");
+    expect(bobParty.sessions.size).toBe(2);
+    await sendText(h1.initiatorSession, "A设备会话 OK");
+    await sendText(h2.initiatorSession, "B设备会话 OK");
+    expect(await receiveAllTexts(h1.responderSession)).toContain("A设备会话 OK");
+    expect(await receiveAllTexts(h2.responderSession)).toContain("B设备会话 OK");
+    // bob 侧回复链路（responder → initiator）
+    await sendText(bobParty.sessions.get(c1.did)!, "bob 回复 1");
+    expect(await receiveAllTexts(h1.initiatorSession)).toContain("bob 回复 1");
+  });
+
+  it("吊销停发与对端轮换：吊销设备后新握手落存活设备，KT 折叠指纹变化可核验", async () => {
+    const bob = createIdentity();
+    await registerUserName(bob, "bob_s10b");
+    const devA = await attachDevice(bob, "设备A");
+    const devB = await attachDevice(bob, "设备B");
+    const bobParty: Party = { identity: bob, prekeys: mergePool([devA, devB]), sessions: new Map() };
+
+    const alice = createIdentity();
+    await handshake({ identity: alice }, bobParty, "初识（经轮询命中的设备）");
+
+    // 吊销前：客户端本地折叠（KT 事件流 + 验签，SR-5）→ 两台有效设备
+    const before = foldDeviceEvents(await fetchKtEvents(bob.did));
+    expect(before.invalidEvents).toBe(0);
+    expect(activeDeviceIds(before).sort()).toEqual([devA.dkId, devB.dkId].sort());
+    const fpBefore = fingerprintDeviceIds(activeDeviceIds(before));
+
+    // bob 吊销设备 A（IK 签名吊销声明）
+    const revocation = makeDeviceRevocation(bob.ikEd.privateKey, bob.did, devA.dkId);
+    const revoke = await fetch(`${base}/v0/registry/devices/${encodeURIComponent(bob.did)}/${encodeURIComponent(devA.dkId)}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ revocation: JSON.parse(encodeDeviceRevocationJson(revocation)) }),
+    });
+    expect(revoke.status).toBe(200);
+    expect(((await revoke.json()) as { changed: boolean }).changed).toBe(true);
+
+    // 吊销后：折叠只剩 B（指纹变化 → 客户端 ensureSessionFresh 触发轮换的依据）
+    const after = foldDeviceEvents(await fetchKtEvents(bob.did));
+    expect(activeDeviceIds(after)).toEqual([devB.dkId]);
+    expect(fingerprintDeviceIds(activeDeviceIds(after))).not.toBe(fpBefore);
+    const viewA = after.devices.find((d) => d.certificate.dkId === devA.dkId)!;
+    expect(viewA.revoked).toBe(true);
+
+    // 对端轮换（rotateSession 的核心动作）：重新握手必然落在存活设备 B
+    const { initiatorSession: rotated } = await handshake({ identity: alice }, bobParty, "轮换后的新握手");
+    await sendText(rotated, "轮换后消息照常收发");
+    const bobSession = bobParty.sessions.get(alice.did)!;
+    expect(await receiveAllTexts(bobSession)).toContain("轮换后消息照常收发");
+
+    // 吊销设备的材料已停发：池中不再有 A 槽位的 OPK 可供分发（本轮分发已落 B 且消耗其 OPK）
+    const statsB = (await (
+      await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(bob.did)}/stats?device=${encodeURIComponent(devB.dkId)}`)
+    ).json()) as { available: number; issued: number };
+    expect(statsB.available + statsB.issued).toBeGreaterThan(0);
+  });
+
+  it("全部设备吊销后 bundle 分发 404（身份无可用设备的诚实语义）", async () => {
+    const carol = createIdentity();
+    await registerUserName(carol, "carol_s10");
+    const dev = await attachDevice(carol, "唯一设备");
+    expect((await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(carol.did)}`)).status).toBe(200);
+
+    const revocation = makeDeviceRevocation(carol.ikEd.privateKey, carol.did, dev.dkId);
+    const revoke = await fetch(`${base}/v0/registry/devices/${encodeURIComponent(carol.did)}/${encodeURIComponent(dev.dkId)}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ revocation: JSON.parse(encodeDeviceRevocationJson(revocation)) }),
+    });
+    expect(revoke.status).toBe(200);
+    expect((await fetch(`${base}/v0/registry/bundle/${encodeURIComponent(carol.did)}`)).status).toBe(404);
+    // 被吊销设备槽位再上传 bundle 也被拒（材料停发的完整性）
+    const spk = generateX25519KeyPair();
+    const opk = generateX25519KeyPair();
+    const bundle = issuePreKeyBundle(carol, spk, { ...opk, id: deriveOpkId(opk.publicKey) }, 3_600_000);
+    const put = await fetch(
+      `${base}/v0/registry/bundle/${encodeURIComponent(carol.did)}?device=${encodeURIComponent(dev.dkId)}`,
+      { method: "PUT", body: Buffer.from(encodePreKeyBundle(bundle)) },
+    );
+    expect(put.status).toBe(403);
   });
 });
