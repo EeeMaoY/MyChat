@@ -51,6 +51,7 @@ import {
   putBlock,
   type StorageStore,
 } from "./storage.ts";
+import { closePersistence, createPersistence, type Persistence, type PersistRecord } from "./persistence.ts";
 
 const MAX_BODY = 16 * 1024 * 1024; // 块大小上限 16MB
 const MAILBOX_MAX_ENTRIES = 1000;
@@ -68,10 +69,78 @@ interface NodeState {
   recovery: Map<string, string>;
   ktlog: KTLogStore;
   relay: RelayHub;
+  persistence: Persistence;
 }
 
-/** 启动 dev 节点（内存态；进程退出即清空——开发环境属性，如实呈现）。 */
-export function startDevNode(opts: { port?: number; host?: string } = {}): Promise<DevNode> {
+/**
+ * 持久化重放（M3 修复）：按序落 store 重建内存态。记录均为已通过准入的操作事实，
+ * 重放不再验签；KT 事件随 register/device-add/device-revoke 一并重建（根链延续）。
+ * 信箱追加不触发 relay 通知（重放时无订阅者）。
+ */
+function replayPersisted(state: NodeState, records: PersistRecord[]): void {
+  for (const r of records) {
+    switch (r.t) {
+      case "register": {
+        const record = parseUserNameRecord({ record: r.record });
+        registerRecord(state.registry, record);
+        appendEvent(state.ktlog, {
+          did: record.did,
+          type: "register",
+          payload: new Uint8Array(Buffer.from(record.name, "utf8")),
+        });
+        break;
+      }
+      case "device-add": {
+        const result = registerDevice(state.devices, r.did, r.json);
+        if (result.ok) {
+          appendEvent(state.ktlog, { did: r.did, type: "device-add", payload: new Uint8Array(Buffer.from(r.json, "utf8")) });
+        }
+        break;
+      }
+      case "device-revoke": {
+        const result = revokeDevice(state.devices, r.did, r.json);
+        if (result.ok) {
+          dropDeviceMaterials(state.bundles, r.did, r.dkId);
+          appendEvent(state.ktlog, { did: r.did, type: "device-revoke", payload: new Uint8Array(Buffer.from(r.json, "utf8")) });
+        }
+        break;
+      }
+      case "bundle":
+        putBundle(state.bundles, r.did, r.dkId, new Uint8Array(Buffer.from(r.bytes, "base64")));
+        break;
+      case "opks":
+        try {
+          putOpks(state.bundles, r.did, r.dkId, r.opks);
+        } catch {
+          /* 超限等：跳过（与写入路径的准入一致） */
+        }
+        break;
+      case "opk-consume":
+        consumeOpk(state.bundles, r.did, r.dkId, r.opkId);
+        break;
+      case "block":
+        putBlock(state.storage, r.cid, new Uint8Array(Buffer.from(r.bytes, "base64")));
+        break;
+      case "block-delete":
+        deleteBlock(state.storage, r.cid);
+        break;
+      case "envelope": {
+        try {
+          mailboxAppend(state.storage, r.mailboxId, envelopeFromJson(r.envelope as EnvelopeJson));
+        } catch {
+          /* 畸形记录跳过 */
+        }
+        break;
+      }
+      case "recovery":
+        state.recovery.set(r.did, r.json);
+        break;
+    }
+  }
+}
+
+/** 启动 dev 节点（内存态；设置 MYCHAT_DATA_DIR / persistDir 后变更追加 JSONL 并在重启时重放）。 */
+export function startDevNode(opts: { port?: number; host?: string; persistDir?: string } = {}): Promise<DevNode> {
   const state: NodeState = {
     storage: createStorageStore(),
     registry: createRegistryStore(),
@@ -80,7 +149,9 @@ export function startDevNode(opts: { port?: number; host?: string } = {}): Promi
     recovery: new Map(),
     ktlog: createKTLogStore(),
     relay: new RelayHub(),
+    persistence: createPersistence(opts.persistDir ?? process.env.MYCHAT_DATA_DIR),
   };
+  replayPersisted(state, state.persistence.load());
 
   const server = createServer((req, res) => {
     // CORS：dev 节点是零信任公共基础设施，浏览器客户端可从任意 origin 访问
@@ -126,7 +197,10 @@ export function startDevNode(opts: { port?: number; host?: string } = {}): Promi
         close: () =>
           new Promise<void>((done) => {
             wss.close();
-            server.close(() => done());
+            server.close(() => {
+              closePersistence(state.persistence);
+              done();
+            });
           }),
       });
     });
@@ -151,6 +225,7 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
         type: "register",
         payload: new Uint8Array(Buffer.from(record.name, "utf8")),
       });
+      state.persistence.append({ t: "register", record: serializeRecord(record) });
       return sendJson(res, 201, { ok: true, ktIndex: record.ktIndex });
     }
     if (req.method === "GET" && parts[1] === "registry" && parts[2] === "resolve" && typeof parts[3] === "string") {
@@ -181,6 +256,7 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
           type: "device-add",
           payload: new Uint8Array(Buffer.from(json, "utf8")),
         });
+        state.persistence.append({ t: "device-add", did, json });
         return sendJson(res, 201, { ok: true, dkId: result.certificate.dkId });
       }
       if (req.method === "DELETE" && typeof parts[4] === "string") {
@@ -200,6 +276,7 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
             type: "device-revoke",
             payload: new Uint8Array(Buffer.from(json, "utf8")),
           });
+          state.persistence.append({ t: "device-revoke", did, dkId, json });
         }
         return sendJson(res, 200, { ok: true, changed: result.changed });
       }
@@ -253,6 +330,18 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
         putOpks(state.bundles, did, requestedDevice, [
           { id: bundle.opkId, public: base58Encode(bundle.opkPublic) },
         ]);
+        state.persistence.append({
+          t: "bundle",
+          did,
+          dkId: requestedDevice,
+          bytes: Buffer.from(new Uint8Array(body)).toString("base64"),
+        });
+        state.persistence.append({
+          t: "opks",
+          did,
+          dkId: requestedDevice,
+          opks: [{ id: bundle.opkId, public: base58Encode(bundle.opkPublic) }],
+        });
         return sendJson(res, 201, { ok: true });
       }
       if (req.method === "POST" && parts[4] === "opks") {
@@ -272,11 +361,20 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
         } catch (err) {
           return sendError(res, 400, err instanceof Error ? err.message : "OPK 非法");
         }
+        state.persistence.append({
+          t: "opks",
+          did,
+          dkId: requestedDevice,
+          opks: body.opks.map((o: { id: unknown; public: unknown }) => ({ id: Number(o.id), public: String(o.public ?? "") })),
+        });
         return sendJson(res, 201, { ok: true, stats: opkPoolStats(state.bundles, did, requestedDevice) });
       }
       if (req.method === "DELETE" && parts[4] === "opk" && typeof parts[5] === "string") {
         const opkId = Number(parts[5]);
         const consumed = Number.isInteger(opkId) ? consumeOpk(state.bundles, did, requestedDevice, opkId) : false;
+        if (consumed) {
+          state.persistence.append({ t: "opk-consume", did, dkId: requestedDevice, opkId });
+        }
         return sendJson(res, 200, { consumed, stats: opkPoolStats(state.bundles, did, requestedDevice) });
       }
       if (req.method === "GET" && parts[4] === "stats") {
@@ -323,6 +421,7 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
           return sendError(res, 400, "公告验签失败");
         }
         state.recovery.set(did, JSON.stringify({ ...a }));
+        state.persistence.append({ t: "recovery", did, json: JSON.stringify({ ...a }) });
         return sendJson(res, 201, { ok: true });
       }
       if (req.method === "GET") {
@@ -371,6 +470,7 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
         const body = await readBody(req);
         if (body.length === 0) return sendError(res, 400, "空块");
         putBlock(state.storage, cid, new Uint8Array(body));
+        state.persistence.append({ t: "block", cid, bytes: Buffer.from(new Uint8Array(body)).toString("base64") });
         return sendJson(res, 201, { ok: true });
       }
       if (req.method === "GET") {
@@ -384,6 +484,9 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
         // 物理删除（FR-4.4 动态删除的物理增强，M3-S12）：CAS 无归属，已知 cid 即可删
         // （cid 不可枚举，攻击者需已知 cid；开发节点属性，配额与审计为后续）
         const removed = deleteBlock(state.storage, cid);
+        if (removed) {
+          state.persistence.append({ t: "block-delete", cid });
+        }
         return sendJson(res, 200, { deleted: removed });
       }
     }
@@ -405,6 +508,7 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
         }
         const cursor = mailboxAppend(state.storage, mailboxId, envelope);
         state.relay.notifyActivity(mailboxId);
+        state.persistence.append({ t: "envelope", mailboxId, envelope: envelopeToJson(envelope) });
         return sendJson(res, 201, { cursor });
       }
       if (req.method === "GET" && parts[4] === undefined) {
