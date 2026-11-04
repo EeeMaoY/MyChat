@@ -538,6 +538,78 @@ export class Messaging {
 
   // ----- 用户名（FR-1.2） -----
 
+  /**
+   * 与节点对账（启动时调用；M3 修复"重启后半可用"问题）：
+   * - 设备凭证重登记（ensureDevice，幂等）；
+   * - 用户名记录缺失或被改 → 重新注册（被他人抢注则提示更换）；
+   * - bundle 与 OPK 池全量重传（幂等覆盖）；
+   * - 恢复公告缺失（节点重启/清空）→ 依本地 wrap 密文副本重传块并重签公告
+   *   （不重新 setup：RK 与守护者手里的旧分片保持有效）。
+   * 返回需要 UI 呈现的提示（null = 无异常）；失败不抛出（刷新页面即重试）。
+   */
+  async reconcileWithNode(): Promise<string | null> {
+    const notices: string[] = [];
+    await this.ensureDevice();
+
+    // 1) 用户名
+    if (this.myName !== null) {
+      let needRegister = false;
+      try {
+        const existing = await this.deps.api.resolve(this.myName);
+        needRegister = existing === null || existing.did !== this.identity.did;
+      } catch {
+        needRegister = true;
+      }
+      if (needRegister) {
+        try {
+          const record = makeUserNameRecord(this.identity.ikEd.privateKey, this.myName, this.identity.did, 0);
+          await this.deps.api.register(record);
+          notices.push(`节点数据已重置，用户名「${this.myName}」已自动重新登记`);
+        } catch {
+          notices.push(`用户名「${this.myName}」重新登记失败（可能已被他人占用），请在"我"页重新设置用户名`);
+        }
+      }
+    }
+
+    // 2) bundle + OPK 池（新好友能找到我的前提）
+    if (this.spk !== undefined && this.opk !== undefined) {
+      try {
+        this.opk.id = deriveOpkId(this.opk.publicKey);
+        await this.deps.api.putBundle(this.identity.did, encodePreKeyBundle(this.issueBundle()), this.deviceDkId);
+        await this.uploadOpkPool();
+      } catch {
+        notices.push("预密钥材料重新上传失败（新好友暂时无法联系你），请刷新页面重试");
+      }
+    }
+
+    // 3) 恢复公告（凭本地 wrap 副本重传 + 重签）
+    const self = await this.getRecoverySelf();
+    if (self?.wrapCipher !== undefined) {
+      try {
+        const remote = await this.deps.api.getRecoveryAnnouncement(this.identity.did).catch(() => null);
+        if (remote === null) {
+          const wrap = base58Decode(self.wrapCipher);
+          await this.deps.api.putBlock(self.wrapCid, wrap);
+          const { makeRecoveryAnnouncement } = await import("@mychat/core");
+          const announcement = makeRecoveryAnnouncement(this.identity, self.wrapCid, self.threshold, self.guardians);
+          await this.deps.api.putRecoveryAnnouncement(this.identity.did, {
+            did: announcement.did,
+            wrapCid: announcement.wrapCid,
+            threshold: announcement.threshold,
+            guardians: announcement.guardians,
+            signature: toBase64(announcement.signature),
+          });
+          notices.push("恢复公告已重新发布到节点");
+        }
+      } catch {
+        /* 公告对账失败不影响主流程（下次启动重试） */
+      }
+    }
+
+    if (notices.length > 0) this.emit();
+    return notices.length > 0 ? notices.join("；") : null;
+  }
+
   /** 注册用户名并上传预密钥束；节点侧与客户端侧双重验签。 */
   async setUsername(name: string): Promise<void> {
     const record = makeUserNameRecord(this.identity.ikEd.privateKey, name, this.identity.did, 0);
@@ -1207,15 +1279,17 @@ export class Messaging {
     }
     await this.deps.kv.put(
       "recovery-self",
-      utf8ToBytes(JSON.stringify({ wrapCid: setup.wrapCid, threshold, guardians: guardianDids })),
+      // wrapCipher 本地副本（M3 修复）：节点为内存态/被清空时，对账可重传块并重签公告
+      utf8ToBytes(JSON.stringify({ wrapCid: setup.wrapCid, threshold, guardians: guardianDids, wrapCipher: base58Encode(setup.wrap) })),
     );
     this.emit();
     return { wrapCid: setup.wrapCid };
   }
 
-  async getRecoverySelf(): Promise<{ wrapCid: string; threshold: number; guardians: string[] } | null> {
+  async getRecoverySelf(): Promise<{ wrapCid: string; threshold: number; guardians: string[]; wrapCipher?: string } | null> {
     const raw = await this.deps.kv.get("recovery-self");
-    return raw ? (JSON.parse(bytesToUtf8(raw)) as { wrapCid: string; threshold: number; guardians: string[] }) : null;
+    if (!raw) return null;
+    return JSON.parse(bytesToUtf8(raw)) as { wrapCid: string; threshold: number; guardians: string[]; wrapCipher?: string };
   }
 
   /** 发起恢复请求（新机/临时身份视角）：向守护者请求分片回传。 */

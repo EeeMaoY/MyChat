@@ -106,6 +106,13 @@ export async function bootstrap(): Promise<void> {
   bindNotifications();
   setState({ phase: "main", did: messaging.identity.did });
   syncFromMessaging();
+  // 与节点对账（节点重启/清空后自动重登记与重传，M3 修复）
+  try {
+    const reconcileNotice = await messaging.reconcileWithNode();
+    if (reconcileNotice !== null) setNotice(reconcileNotice);
+  } catch {
+    /* 对账失败不阻塞进入主界面（刷新页面即重试） */
+  }
   messaging.startRealtime();
   void messaging.poll();
 }
