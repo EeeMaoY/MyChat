@@ -7,6 +7,7 @@ import AddFriendModal from "../components/AddFriendModal";
 import ChatPanel from "../components/ChatPanel";
 import ContactSidebar from "../components/ContactSidebar";
 import CreateGroupModal from "../components/CreateGroupModal";
+import FriendRequestBanner from "../components/FriendRequestBanner";
 import ProfileModal from "../components/ProfileModal";
 import RecoveryRequestBanner from "../components/RecoveryRequestBanner";
 import TimelinePage from "../components/TimelinePage";
@@ -19,6 +20,7 @@ export default function MainPage() {
 
   return (
     <div className="main-root">
+      <FriendRequestBanner />
       <RecoveryRequestBanner />
       <div className={`main-layout${state.view === "chat" && state.activeDid !== null ? " chat-open" : ""}`}>
         <ContactSidebar

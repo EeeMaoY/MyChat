@@ -9,7 +9,7 @@ import { useSyncExternalStore } from "react";
 
 import { base58Decode, createIdbKVStore, decryptAttachment, type KVStore } from "@mychat/core";
 
-import { Messaging, groupChatKey, type ChatMessage, type Contact, type GroupSummary, type MomentItem } from "./messaging";
+import { Messaging, groupChatKey, type ChatMessage, type Contact, type FriendRequestItem, type GroupSummary, type MomentItem } from "./messaging";
 import { NodeApi } from "./node-api";
 
 export type Phase = "loading" | "welcome" | "creating" | "set-name" | "main";
@@ -23,11 +23,13 @@ export interface AppState {
   contacts: Contact[];
   groups: GroupSummary[];
   moments: MomentItem[];
+  /** 待确认好友申请（M3 修复 FR-8.1） */
+  friendRequests: FriendRequestItem[];
   messages: Record<string, ChatMessage[]>;
   online: boolean;
   notice: string | null;
   /** 当前打开的会话：1:1 = 对方 DID；群组 = group:<groupId>（M3-S11） */
-  activeDid: null | string;
+  activeDid: string | null;
   view: MainView;
 }
 
@@ -42,6 +44,7 @@ let state: AppState = {
   contacts: [],
   groups: [],
   moments: [],
+  friendRequests: [],
   messages: {},
   online: true,
   notice: null,
@@ -84,6 +87,7 @@ function syncFromMessaging(): void {
     online: messaging.online,
   });
   void refreshMoments();
+  void refreshFriendRequests();
 }
 
 /** 时间线快照刷新（kv 异步扫描；随每次状态同步触发）。 */
@@ -91,6 +95,13 @@ async function refreshMoments(): Promise<void> {
   if (!messaging) return;
   const items = await messaging.listTimeline();
   setState({ moments: items });
+}
+
+/** 待确认好友申请快照刷新。 */
+async function refreshFriendRequests(): Promise<void> {
+  if (!messaging) return;
+  const requests = await messaging.listFriendRequests();
+  setState({ friendRequests: requests });
 }
 
 /** 启动：加载身份或进入欢迎流程。 */
@@ -231,6 +242,18 @@ export async function deleteMoment(cid: string): Promise<void> {
 export async function commentMoment(authorDid: string, cid: string, text: string): Promise<void> {
   if (!messaging) throw new Error("应用尚未就绪");
   await messaging.commentMoment(authorDid, cid, text);
+}
+
+// ---------- 好友申请确认（M3 修复 FR-8.1） ----------
+
+export async function acceptFriendRequest(fromDid: string): Promise<void> {
+  if (!messaging) throw new Error("应用尚未就绪");
+  await messaging.acceptFriendRequest(fromDid);
+}
+
+export async function rejectFriendRequest(fromDid: string): Promise<void> {
+  if (!messaging) throw new Error("应用尚未就绪");
+  await messaging.rejectFriendRequest(fromDid);
 }
 
 // ---------- 群组（FR-6.1/6.2，M3-S11 UI 接入用） ----------

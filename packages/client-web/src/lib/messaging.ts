@@ -137,6 +137,23 @@ export function groupChatKey(groupId: string): string {
   return `group:${groupId}`;
 }
 
+/** 待确认的好友申请（M3 修复：陌生人握手不再自动成为好友）。 */
+export interface FriendRequestItem {
+  fromDid: string;
+  name: string | null;
+  note: string;
+  at: number;
+}
+
+/** 队列存储形态（会话序列化随申请保存，通过即生效）。 */
+interface FriendRequestStored {
+  fromDid: string;
+  name: string | null;
+  note: string;
+  sessionWire: string;
+  at: number;
+}
+
 /** 群组条目（UI 快照用）。 */
 export interface GroupSummary {
   groupId: string;
@@ -1038,6 +1055,48 @@ export class Messaging {
     }
   }
 
+  // ----- 好友申请确认（M3 修复 FR-8.1：申请 → 通过/拒绝） -----
+
+  /** 待确认申请列表（按时间倒序）。 */
+  async listFriendRequests(): Promise<FriendRequestItem[]> {
+    const out: FriendRequestItem[] = [];
+    for (const key of await this.deps.kv.keys("friend-request:")) {
+      const raw = await this.deps.kv.get(key);
+      if (!raw) continue;
+      try {
+        const req = JSON.parse(bytesToUtf8(raw)) as FriendRequestStored;
+        out.push({ fromDid: req.fromDid, name: req.name, note: req.note, at: req.at });
+      } catch {
+        /* 损坏条目跳过 */
+      }
+    }
+    return out.sort((a, b) => b.at - a.at);
+  }
+
+  /** 通过申请：恢复随申请保存的会话、建立联系人、分发好友圈密钥。 */
+  async acceptFriendRequest(fromDid: string): Promise<void> {
+    const raw = await this.deps.kv.get(`friend-request:${fromDid}`);
+    if (!raw) throw new Error("申请不存在（可能已处理）");
+    const req = JSON.parse(bytesToUtf8(raw)) as FriendRequestStored;
+    const session = deserializeSession(req.sessionWire);
+    this.sessions.set(fromDid, session);
+    this.contacts.set(fromDid, { did: fromDid, name: req.name ?? null, addedAt: Date.now() });
+    await this.saveContact(fromDid);
+    await this.saveSession(fromDid);
+    await this.appendLocalMessage(fromDid, "in", req.note, "handshake");
+    await this.deps.kv.delete(`friend-request:${fromDid}`);
+    // 新好友：分发我的好友圈密钥（与主动加好友对齐，M3-S12）
+    void this.distributeMomentKeys().catch(() => undefined);
+    this.restartRealtime();
+    this.emit();
+  }
+
+  /** 拒绝申请（静默丢弃：对方无感知，可再次申请）。 */
+  async rejectFriendRequest(fromDid: string): Promise<void> {
+    await this.deps.kv.delete(`friend-request:${fromDid}`);
+    this.emit();
+  }
+
   // ----- 数据导出与好友托管（FR-7.2 / FR-7.3 M1，M1 计划 §3.4） -----
 
   /**
@@ -1560,21 +1619,30 @@ export class Messaging {
       const handshake = JSON.parse(bytesToUtf8(plaintext)) as HandshakePayload;
       if (handshake.v !== 1 || typeof handshake.fromDid !== "string") return;
 
-      // M2-S9 会话重建（KI-1）：已知联系人的新握手接受并替换会话（消息历史保留）
+      // M3 修复（好友确认流）：已知好友的新握手沿用 S9 替换语义（设备变更/恢复场景）；
+      // 陌生人首次握手完成密码学处理（accept + OPK 消耗，与 Signal 语义一致）后
+      // 进入待确认队列——不自动成为好友，由用户通过/拒绝。
       const existed = this.contacts.has(handshake.fromDid);
-      this.sessions.set(handshake.fromDid, session);
-      if (!existed) {
-        this.contacts.set(handshake.fromDid, {
-          did: handshake.fromDid,
-          name: handshake.fromName ?? null,
-          addedAt: Date.now(),
-        });
-        await this.saveContact(handshake.fromDid);
-        await this.appendLocalMessage(handshake.fromDid, "in", handshake.note, "handshake");
+      if (existed) {
+        this.sessions.set(handshake.fromDid, session);
+        await this.saveSession(handshake.fromDid);
+        this.onSessionRebuilt?.(handshake.fromDid);
+        this.restartRealtime();
+        return;
       }
-      await this.saveSession(handshake.fromDid);
-      if (existed) this.onSessionRebuilt?.(handshake.fromDid);
-      this.restartRealtime(); // 新/重建会话需订阅其接收信箱
+      await this.deps.kv.put(
+        `friend-request:${handshake.fromDid}`,
+        utf8ToBytes(
+          JSON.stringify({
+            fromDid: handshake.fromDid,
+            name: handshake.fromName ?? null,
+            note: handshake.note,
+            sessionWire: serializeSession(session),
+            at: Date.now(),
+          } satisfies FriendRequestStored),
+        ),
+      );
+      this.emit();
     } catch {
       // OPK 全部消耗/篡改等失败：忽略（陌生人重放握手被天然拒绝）
     }
