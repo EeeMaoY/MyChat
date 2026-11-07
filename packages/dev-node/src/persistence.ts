@@ -13,7 +13,7 @@
  *
  * 追加失败（磁盘问题）：请求仍成功但打印警告（开发节点尽力而为，不因磁盘拒绝服务）。
  */
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
 export type PersistRecord =
@@ -30,7 +30,12 @@ export type PersistRecord =
 
 export interface Persistence {
   append(record: PersistRecord): void;
+  /** 快照基线 + JSONL 增量的合并读取（快照在前）。 */
   load(): PersistRecord[];
+  /** 上次 load 的原始记录条数（快照压缩决策依据，M4-S13）。 */
+  lastLoadCount(): number;
+  /** 快照压缩：以等效记录序列覆盖 snapshot.json 并轮转 JSONL（M4-S13）。 */
+  compact(records: PersistRecord[]): void;
 }
 
 export class NoopPersistence implements Persistence {
@@ -38,12 +43,17 @@ export class NoopPersistence implements Persistence {
   load(): PersistRecord[] {
     return [];
   }
+  lastLoadCount(): number {
+    return 0;
+  }
+  compact(): void {}
 }
 
 const FILE_NAME = "node-log.jsonl";
 
 export class FilePersistence implements Persistence {
   private fd: number | null = null;
+  private loadCount = 0;
 
   constructor(private dir: string) {
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
@@ -51,6 +61,10 @@ export class FilePersistence implements Persistence {
 
   private filePath(): string {
     return join(this.dir, FILE_NAME);
+  }
+
+  private snapshotPath(): string {
+    return join(this.dir, "snapshot.json");
   }
 
   append(record: PersistRecord): void {
@@ -66,19 +80,57 @@ export class FilePersistence implements Persistence {
   }
 
   load(): PersistRecord[] {
-    const path = this.filePath();
-    if (!existsSync(path)) return [];
     const out: PersistRecord[] = [];
-    const text = readFileSync(path, "utf8");
-    for (const line of text.split("\n")) {
-      if (line.trim() === "") continue;
+    // 快照基线（compact 后的完整状态；快照存在时 JSONL 只含其后的增量）
+    if (existsSync(this.snapshotPath())) {
       try {
-        out.push(JSON.parse(line) as PersistRecord);
-      } catch {
-        console.warn("[mychat-dev-node] 跳过损坏的持久化记录行");
+        const parsed = JSON.parse(readFileSync(this.snapshotPath(), "utf8")) as { v?: number; records?: PersistRecord[] };
+        if (parsed.v === 1 && Array.isArray(parsed.records)) out.push(...parsed.records);
+        else console.warn("[mychat-dev-node] 快照版本不识别，忽略快照");
+      } catch (err) {
+        console.warn("[mychat-dev-node] 快照读取失败（忽略，退回纯重放）:", err instanceof Error ? err.message : err);
       }
     }
+    // JSONL 增量
+    const path = this.filePath();
+    if (existsSync(path)) {
+      const text = readFileSync(path, "utf8");
+      for (const line of text.split("\n")) {
+        if (line.trim() === "") continue;
+        try {
+          out.push(JSON.parse(line) as PersistRecord);
+        } catch {
+          console.warn("[mychat-dev-node] 跳过损坏的持久化记录行");
+        }
+      }
+    }
+    this.loadCount = out.length;
     return out;
+  }
+
+  lastLoadCount(): number {
+    return this.loadCount;
+  }
+
+  /**
+   * 快照压缩（M4-S13）：等效记录序列写入 snapshot.json（tmp+rename 原子化），
+   * JSONL 轮转为带时间戳的 .bak（保留一份；追加句柄关闭后重开新文件）。
+   */
+  compact(records: PersistRecord[]): void {
+    const tmp = `${this.snapshotPath()}.tmp`;
+    try {
+      writeFileSync(tmp, JSON.stringify({ v: 1, savedAt: new Date().toISOString(), records }));
+      if (existsSync(this.snapshotPath())) rmSync(this.snapshotPath());
+      renameSync(tmp, this.snapshotPath());
+      // 关闭当前句柄后轮转 JSONL
+      this.close();
+      if (existsSync(this.filePath())) {
+        renameSync(this.filePath(), join(this.dir, `${FILE_NAME}.${Date.now()}.bak`));
+      }
+      this.loadCount = records.length;
+    } catch (err) {
+      console.warn("[mychat-dev-node] 快照压缩失败（下次启动重试）:", err instanceof Error ? err.message : err);
+    }
   }
 
   close(): void {

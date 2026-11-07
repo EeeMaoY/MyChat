@@ -22,6 +22,8 @@ export interface DeviceEntry {
   /** 凭证原始 JSON（客户端可逐字节复核的形态） */
   certificate: string;
   revokedAt: number | null;
+  /** 吊销声明原文（快照导出与重放重建吊销状态用，M4-S13） */
+  revokedJson?: string;
 }
 
 export interface DeviceRegistryStore {
@@ -92,7 +94,10 @@ export function revokeDevice(
     return { ok: false, error: "设备不存在（未登记）" };
   }
   const changed = entry.revokedAt === null;
-  if (changed) entry.revokedAt = revocation.revokedAt;
+  if (changed) {
+    entry.revokedAt = revocation.revokedAt;
+    entry.revokedJson = revocationJson;
+  }
   return { ok: true, revocation, changed };
 }
 
