@@ -271,6 +271,32 @@ export class NodeApi {
     if (!res.ok) await readError(res);
   }
 
+  // ----- Web Push（M4-S15） -----
+
+  /** 节点 VAPID 公钥（base64url；订阅的 applicationServerKey）。 */
+  async getVapidPublicKey(): Promise<{ publicKey: string }> {
+    const res = await fetch(`${this.baseUrl}/v0/push/vapid`);
+    if (!res.ok) await readError(res);
+    return (await res.json()) as { publicKey: string };
+  }
+
+  /** 登记/更新订阅（mailboxes 整体覆盖；信箱面变化时重发）。 */
+  async putPushSubscription(subscription: Record<string, unknown>, mailboxes: string[]): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/v0/push/subscribe`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ subscription, mailboxes }),
+    });
+    if (!res.ok) await readError(res);
+  }
+
+  async deletePushSubscription(endpoint: string): Promise<void> {
+    const res = await fetch(`${this.baseUrl}/v0/push/subscribe?endpoint=${encodeURIComponent(endpoint)}`, {
+      method: "DELETE",
+    });
+    if (!res.ok) await readError(res);
+  }
+
   // ----- Relay: WS 唤醒订阅 -----
 
   /**

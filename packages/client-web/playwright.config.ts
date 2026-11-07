@@ -29,7 +29,7 @@ export default defineConfig({
       port: NODE_PORT,
       reuseExistingServer: true,
       timeout: 30_000,
-      env: { ...process.env, MYCHAT_PORT: String(NODE_PORT), MYCHAT_HOST: "127.0.0.1" },
+      env: { ...process.env, MYCHAT_PORT: String(NODE_PORT), MYCHAT_HOST: "127.0.0.1" } as Record<string, string>,
     },
     {
       command: `npm run dev -w @mychat/client-web -- --port ${CLIENT_PORT} --strictPort --host 127.0.0.1`,
@@ -37,7 +37,7 @@ export default defineConfig({
       port: CLIENT_PORT,
       reuseExistingServer: true,
       timeout: 30_000,
-      env: process.env,
+      env: process.env as Record<string, string>,
     },
   ],
 });

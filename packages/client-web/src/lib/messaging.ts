@@ -1904,8 +1904,8 @@ export class Messaging {
 
   // ----- 实时（WS 唤醒 + 轮询兜底，W2 约束） -----
 
-  startRealtime(): void {
-    this.stopRealtime();
+  /** 当前实时订阅的信箱面（推送订阅与 WS 面一致，M4-S15；轮换/新会话后重算）。 */
+  realtimeMailboxes(): string[] {
     const mailboxes = [discoveryInboxId(this.identity.did)];
     for (const did of this.contacts.keys()) {
       const session = this.sessions.get(did);
@@ -1915,10 +1915,15 @@ export class Messaging {
         mailboxes.push(sessionMailbox(session, "recv", at));
       }
     }
-    // 群信箱订阅（当前 epoch；轮换后 restartRealtime 切新信箱，M3-S11）
     for (const view of this.groups.values()) {
       mailboxes.push(groupMailboxId(view.groupSecret, view.state.epoch));
     }
+    return mailboxes;
+  }
+
+  startRealtime(): void {
+    this.stopRealtime();
+    const mailboxes = this.realtimeMailboxes();
     const stopWs = this.deps.api.subscribeMailboxes(mailboxes, () => void this.poll());
     this.pollTimer = setInterval(() => void this.poll(), 3000);
     this.stopWs = stopWs;
@@ -1932,7 +1937,13 @@ export class Messaging {
   }
 
   private restartRealtime(): void {
-    if (this.stopWs) this.startRealtime();
+    if (this.stopWs) {
+      this.startRealtime();
+      // 信箱面变化同步到离线推送订阅（M4-S15；fire-and-forget）
+      void import("./push").then(({ updatePushMailboxes }) =>
+        updatePushMailboxes(this.deps.api, this.realtimeMailboxes()),
+      );
+    }
   }
 
   // ----- 持久化辅助 -----

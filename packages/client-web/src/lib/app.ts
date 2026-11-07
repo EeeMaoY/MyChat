@@ -12,6 +12,7 @@ import { createIdbKVStore, base58Decode, decryptAttachment, type KVStore } from 
 import { Messaging, groupChatKey, type ChatMessage, type Contact, type FriendRequestItem, type GroupSummary, type MomentItem } from "./messaging";
 import { NodeApi } from "./node-api";
 import { changeVaultPassphrase as changeVaultPassphraseInner, isVaultConfigured, isVaultUnlocked, lockVault, setupVault as setupVaultInner, unlockVault as unlockVaultInner, wrapVault } from "./keyvault";
+import { ensurePushSubscription, updatePushMailboxes } from "./push";
 
 export type Phase = "loading" | "welcome" | "creating" | "set-name" | "main" | "locked";
 /** 主区视图：会话（默认）/ 动态时间线（M3-S12）。 */
@@ -205,6 +206,8 @@ async function startApp(): Promise<void> {
   messaging.startRealtime();
   void messaging.poll();
   startAutoLock();
+  // Web Push（M4-S15）：通知权限已 granted 时建立离线订阅（fire-and-forget 增强）
+  void ensurePushSubscription(new NodeApi(nodeBaseUrl()), messaging.realtimeMailboxes());
 }
 
 // ---------- 口令密钥库操作（加固批次 ①，UI 接入用） ----------
