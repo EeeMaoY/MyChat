@@ -11,10 +11,12 @@
   },
   "dependencies": {
     "@mychat/core": "*",
+    "web-push": "^4.0.0",
     "ws": "^8.18.0"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",
+    "@types/web-push": "^3.6.4",
     "@types/ws": "^8.5.13",
     "typescript": "^5.6.0",
     "vitest": "^3.0.0"

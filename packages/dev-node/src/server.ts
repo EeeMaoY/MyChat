@@ -53,6 +53,7 @@ import {
 } from "./storage.ts";
 import { closePersistence, createPersistence, type Persistence, type PersistRecord } from "./persistence.ts";
 import { DEFAULT_LIMITS, RateLimiter, type Limits } from "./limits.ts";
+import { createPushStore, notifyMailbox, putSubscription, removeSubscription, type PushStore } from "./push.ts";
 
 const MAX_BODY = 16 * 1024 * 1024; // 块大小上限 16MB
 const MAILBOX_MAX_ENTRIES = 1000;
@@ -60,6 +61,8 @@ const MAILBOX_MAX_ENTRIES = 1000;
 export interface DevNode {
   port: number;
   close(): Promise<void>;
+  /** Push store（测试注入 sender 用；非正式 API） */
+  push: PushStore;
 }
 
 interface NodeState {
@@ -71,6 +74,7 @@ interface NodeState {
   ktlog: KTLogStore;
   relay: RelayHub;
   persistence: Persistence;
+  push: PushStore;
   limits: Limits;
   limiters: {
     mailboxAppend: RateLimiter;
@@ -210,6 +214,7 @@ export function startDevNode(
     ktlog: createKTLogStore(),
     relay: new RelayHub(),
     persistence: createPersistence(opts.persistDir ?? process.env.MYCHAT_DATA_DIR),
+    push: createPushStore(opts.persistDir === undefined ? process.env.MYCHAT_DATA_DIR : opts.persistDir),
     limits,
     limiters: {
       mailboxAppend: new RateLimiter(limits.mailboxAppendPerMin, 60_000),
@@ -267,6 +272,7 @@ export function startDevNode(
       const { port } = server.address() as AddressInfo;
       resolve({
         port,
+        push: state.push,
         close: () =>
           new Promise<void>((done) => {
             wss.close();
@@ -594,12 +600,43 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
         const cursor = mailboxAppend(state.storage, mailboxId, envelope);
         state.relay.notifyActivity(mailboxId);
         state.persistence.append({ t: "envelope", mailboxId, envelope: envelopeToJson(envelope) });
+        // Web Push 唤醒（M4-S15，fire-and-forget：无 payload，内容永不出密文层）
+        void notifyMailbox(state.push, mailboxId);
         return sendJson(res, 201, { cursor });
       }
       if (req.method === "GET" && parts[4] === undefined) {
         const cursor = Number(url.searchParams.get("cursor") ?? "0");
         const result = mailboxFetch(state.storage, mailboxId, Number.isInteger(cursor) && cursor >= 0 ? cursor : 0);
         return sendJson(res, 200, { envelopes: result.envelopes.map(envelopeToJson), cursor: result.cursor });
+      }
+    }
+
+    // ----- Web Push 订阅（M4-S15） -----
+    if (parts[1] === "push" && parts[2] === "vapid" && req.method === "GET") {
+      return sendJson(res, 200, { publicKey: state.push.vapid.publicKey });
+    }
+    if (parts[1] === "push" && parts[2] === "subscribe") {
+      if (req.method === "PUT") {
+        const body = await readJson(req);
+        const subscription = body.subscription as { endpoint?: string; keys?: unknown } | undefined;
+        if (
+          subscription === undefined ||
+          typeof subscription.endpoint !== "string" ||
+          subscription.endpoint.length > 2048 ||
+          typeof subscription.keys !== "object"
+        ) {
+          return sendError(res, 400, "订阅结构非法");
+        }
+        const mailboxes = Array.isArray(body.mailboxes)
+          ? body.mailboxes.filter((m): m is string => typeof m === "string" && m.length <= 128).slice(0, 256)
+          : [];
+        putSubscription(state.push, subscription as never, mailboxes);
+        return sendJson(res, 201, { ok: true });
+      }
+      if (req.method === "DELETE") {
+        const endpoint = url.searchParams.get("endpoint") ?? "";
+        const removed = removeSubscription(state.push, endpoint);
+        return sendJson(res, 200, { removed });
       }
     }
 
