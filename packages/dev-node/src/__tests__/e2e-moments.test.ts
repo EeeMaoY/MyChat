@@ -257,7 +257,16 @@ async function publishMoment(author: Party, text: string, imageBytes?: Uint8Arra
   expect(put.status).toBe(201);
   const key = base58Decode(author.myMomentKey);
   const feedId = momentFeedId(key);
-  const entry = { v: 1 as const, type: "post" as const, cid: created.cid, contentKey: created.contentKey, nonce: created.nonce, at: Date.now() };
+  const { makeMomentEntry } = await import("@mychat/core");
+  const entry = makeMomentEntry(author.identity.ikEd.privateKey, {
+    v: 1,
+    type: "post",
+    cid: created.cid,
+    authorDid: author.identity.did,
+    contentKey: created.contentKey,
+    nonce: created.nonce,
+    at: Date.now(),
+  });
   await append(feedId, seal(sealFeedEntry(key, entry), feedId));
   return { cid: created.cid, imageCid };
 }
@@ -342,10 +351,12 @@ describe("M3-S12 Gate：动态 v1（FR-4.1/4.2/4.4）", () => {
     const kept = await publishMoment(alice, "保留的动态");
     const removed = await publishMoment(alice, "将被删除的动态");
 
-    // 作者删除：墓碑 + 物理删块
+    // 作者删除：墓碑（IK 签名条目）+ 物理删块
     const key = base58Decode(alice.myMomentKey);
     const feedId = momentFeedId(key);
-    await append(feedId, seal(sealFeedEntry(key, { v: 1, type: "delete", cid: removed.cid, at: Date.now() }), feedId));
+    const { makeMomentEntry } = await import("@mychat/core");
+    const tombstone = makeMomentEntry(alice.identity.ikEd.privateKey, { v: 1, type: "delete", cid: removed.cid, authorDid: alice.identity.did, at: Date.now() });
+    await append(feedId, seal(sealFeedEntry(key, tombstone), feedId));
     const del = await fetch(`${base}/v0/storage/blocks/${encodeURIComponent(removed.cid)}`, { method: "DELETE" });
     expect(((await del.json()) as { deleted: boolean }).deleted).toBe(true);
 

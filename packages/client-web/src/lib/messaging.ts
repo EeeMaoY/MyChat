@@ -52,6 +52,7 @@ import {
   makeDeviceRevocation,
   makeGroupKeysPayload,
   makeEnvelope,
+  makeMomentEntry,
   makeUserNameRecord,
   momentFeedId,
   openFeedEntry,
@@ -955,7 +956,16 @@ export class Messaging {
     }
     const created = createMomentBlock({ v: 1, text, ...(attachment ? { attachment } : {}) });
     await this.deps.api.putBlock(created.cid, created.block);
-    const entry = { v: 1 as const, type: "post" as const, cid: created.cid, contentKey: created.contentKey, nonce: created.nonce, at: Date.now() };
+    // 条目带 IK 签名（加固批次 ②）：好友端验签作者性，圈密钥持有者无法伪造
+    const entry = makeMomentEntry(this.identity.ikEd.privateKey, {
+      v: 1,
+      type: "post",
+      cid: created.cid,
+      authorDid: this.identity.did,
+      contentKey: created.contentKey,
+      nonce: created.nonce,
+      at: Date.now(),
+    });
     const feedId = momentFeedId(base58Decode(this.myMomentKey));
     await this.deps.api.mailboxAppend(feedId, this.seal(sealFeedEntry(base58Decode(this.myMomentKey), entry), feedId));
     // 本地立即入时间线（作者视角）
@@ -969,7 +979,13 @@ export class Messaging {
     if (this.myMomentKey === null) throw new Error("好友圈未就绪");
     const key = base58Decode(this.myMomentKey);
     const feedId = momentFeedId(key);
-    const tombstone = { v: 1 as const, type: "delete" as const, cid, at: Date.now() };
+    const tombstone = makeMomentEntry(this.identity.ikEd.privateKey, {
+      v: 1,
+      type: "delete",
+      cid,
+      authorDid: this.identity.did,
+      at: Date.now(),
+    });
     await this.deps.api.mailboxAppend(feedId, this.seal(sealFeedEntry(key, tombstone), feedId));
     try {
       await this.deps.api.deleteBlock(cid);
@@ -1023,6 +1039,8 @@ export class Messaging {
       for (const envelope of envelopes) {
         try {
           const entry = openFeedEntry(theirKey, stripPadding(envelope.payload));
+          // 双重作者性断言：签名者即条目作者（open 内验签），且条目属于该日志的作者
+          if (entry.authorDid !== did) continue;
           const kvKey = `moment:${did}:${entry.cid}`;
           if (entry.type === "delete") {
             const raw = await this.deps.kv.get(kvKey);
