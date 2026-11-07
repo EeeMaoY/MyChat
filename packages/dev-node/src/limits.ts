@@ -7,11 +7,13 @@
 /** 简单滑动窗口计数器（内存态；窗口过期即释放语义，不做持久化）。 */
 export class RateLimiter {
   private windows = new Map<string, number[]>();
+  private limit: number;
+  private windowMs: number;
 
-  constructor(
-    private limit: number,
-    private windowMs: number,
-  ) {}
+  constructor(limit: number, windowMs: number) {
+    this.limit = limit;
+    this.windowMs = windowMs;
+  }
 
   /** 是否允许本次操作（允许则记录；拒绝不记录，失败重试不加倍惩罚）。 */
   allow(key: string): boolean {

@@ -91,7 +91,7 @@ export default function App() {
 
   // 创建页退出条件：动画计时结束，且流程已落到后续任一阶段
   // （起名页；注册成功会直接跳过起名页进主界面，同样视为已退出）
-  const settled = animDone && (state.phase === "set-name" || state.phase === "main");
+  const settled = animDone && ["set-name", "main", "locked", "welcome"].includes(state.phase);
   const creating = creatingRequested && !settled;
 
   let page: ReactNode;

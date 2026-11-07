@@ -54,8 +54,10 @@ const FILE_NAME = "node-log.jsonl";
 export class FilePersistence implements Persistence {
   private fd: number | null = null;
   private loadCount = 0;
+  private dir: string;
 
-  constructor(private dir: string) {
+  constructor(dir: string) {
+    this.dir = dir;
     if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
   }
 
