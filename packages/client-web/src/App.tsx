@@ -8,6 +8,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { bootstrap, createMyIdentity, setNotice, useAppState } from "./lib/app";
 
 import CreatingPage from "./pages/CreatingPage";
+import LockedPage from "./components/LockedPage";
 import MainPage from "./pages/MainPage";
 import RecoveryWizard from "./pages/RecoveryWizard";
 import SetNamePage from "./pages/SetNamePage";
@@ -108,6 +109,8 @@ export default function App() {
     );
   } else if (state.phase === "welcome") {
     page = <WelcomePage onStart={startCreate} onRecovery={openRecovery} />;
+  } else if (state.phase === "locked") {
+    page = <LockedPage />;
   } else if (state.phase === "set-name") {
     page = <SetNamePage />;
   } else {

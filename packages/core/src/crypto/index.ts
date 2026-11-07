@@ -17,6 +17,7 @@ export {
   blake3Hash,
 } from "./hash.ts";
 export { HKDF_OUTPUT_LENGTH, hkdfSha256 } from "./kdf.ts";
+export { deriveKekFromPassphrase, PASSPHRASE_KEK_LENGTH, PASSPHRASE_SALT_LENGTH } from "./password.ts";
 export {
   KEY_LENGTH,
   type KeyPair,

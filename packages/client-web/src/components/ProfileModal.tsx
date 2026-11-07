@@ -5,6 +5,7 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 
 import {
+  changeVaultPassphrase,
   createCustodyBackup,
   exportAllData,
   getMyDevice,
@@ -13,6 +14,7 @@ import {
   importAllData,
   listCustodyCopies,
   listMyDevices,
+  lockApp,
   resetMomentCircle,
   revokeMyDevice,
   setNotice,
@@ -28,6 +30,8 @@ import Modal from "./Modal";
 
 interface Props {
   onClose: () => void;
+  /** 未设置口令时"设置访问口令"入口（弹窗由 MainPage 装配） */
+  onSetupPassphrase: () => void;
 }
 
 const NODE_URL_KEY = "mychat.node-url";
@@ -42,7 +46,7 @@ interface RecoverySelfInfo {
   guardians: string[];
 }
 
-export default function ProfileModal({ onClose }: Props) {
+export default function ProfileModal({ onClose, onSetupPassphrase }: Props) {
   const state = useAppState();
   const did = state.did;
 
@@ -90,6 +94,7 @@ export default function ProfileModal({ onClose }: Props) {
   const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
   const [revokePending, setRevokePending] = useState(false);
   const [circleResetPending, setCircleResetPending] = useState(false);
+  const [passPending, setPassPending] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -429,6 +434,43 @@ export default function ProfileModal({ onClose }: Props) {
       </div>
       <p className="field-hint">
         怀疑好友圈密钥泄露（如共用设备被他人使用）时重置：新动态只有持有新密钥的好友可读；已缓存的旧动态不受影响。
+      </p>
+
+      {/* 安全与锁定（加固批次 ①） */}
+      <label className="field-label">安全与锁定</label>
+      <div className="inline-row data-row">
+        {state.vaultConfigured ? (
+          <>
+            <button
+              className="btn-ghost"
+              disabled={passPending}
+              onClick={async () => {
+                const oldPass = window.prompt("输入当前口令");
+                if (oldPass === null) return;
+                const newPass = window.prompt("输入新口令（至少 8 位）");
+                if (newPass === null) return;
+                setPassPending(true);
+                const err = await changeVaultPassphrase(oldPass, newPass);
+                setPassPending(false);
+                setNotice(err ?? "口令已修改，本地数据已重新加密");
+              }}
+            >
+              修改口令
+            </button>
+            <button className="btn-ghost" onClick={() => lockApp()}>
+              立即锁定
+            </button>
+          </>
+        ) : (
+          <button className="btn-primary" onClick={() => onSetupPassphrase()}>
+            设置访问口令
+          </button>
+        )}
+      </div>
+      <p className="field-hint">
+        {state.vaultConfigured
+          ? "口令加密本机私钥材料；15 分钟无操作将自动锁定。"
+          : "未设置口令：本机私钥以明文存储，建议立即设置。"}
       </p>
 
       {/* 数据安全：导出/导入（FR-7.2）与好友托管备份（FR-7.3） */}

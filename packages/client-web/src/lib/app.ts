@@ -7,12 +7,13 @@
  */
 import { useSyncExternalStore } from "react";
 
-import { base58Decode, createIdbKVStore, decryptAttachment, type KVStore } from "@mychat/core";
+import { createIdbKVStore, base58Decode, decryptAttachment, type KVStore } from "@mychat/core";
 
 import { Messaging, groupChatKey, type ChatMessage, type Contact, type FriendRequestItem, type GroupSummary, type MomentItem } from "./messaging";
 import { NodeApi } from "./node-api";
+import { changeVaultPassphrase as changeVaultPassphraseInner, isVaultConfigured, isVaultUnlocked, lockVault, setupVault as setupVaultInner, unlockVault as unlockVaultInner, wrapVault } from "./keyvault";
 
-export type Phase = "loading" | "welcome" | "creating" | "set-name" | "main";
+export type Phase = "loading" | "welcome" | "creating" | "set-name" | "main" | "locked";
 /** 主区视图：会话（默认）/ 动态时间线（M3-S12）。 */
 export type MainView = "chat" | "timeline";
 
@@ -31,11 +32,17 @@ export interface AppState {
   /** 当前打开的会话：1:1 = 对方 DID；群组 = group:<groupId>（M3-S11） */
   activeDid: string | null;
   view: MainView;
+  /** 口令密钥库是否已配置（未配置时 UI 引导设置，加固批次 ①） */
+  vaultConfigured: boolean;
 }
 
 let kv: KVStore | null = null;
 let messaging: Messaging | null = null;
 let pendingName: string | null = null;
+/** 自动锁定计时（最后活动时间；main 态且有身份时启用） */
+let lastActivityAt = 0;
+const AUTO_LOCK_MS = 15 * 60_000;
+let autoLockTimer: ReturnType<typeof setInterval> | null = null;
 
 let state: AppState = {
   phase: "loading",
@@ -50,6 +57,7 @@ let state: AppState = {
   notice: null,
   activeDid: null,
   view: "chat",
+  vaultConfigured: false,
 };
 
 const listeners = new Set<() => void>();
@@ -104,18 +112,84 @@ async function refreshFriendRequests(): Promise<void> {
   setState({ friendRequests: requests });
 }
 
-/** 启动：加载身份或进入欢迎流程。 */
+/** 启动：装配加密 KV；密钥库已配置则进入锁屏（解锁后 startApp）。 */
 export async function bootstrap(): Promise<void> {
-  kv = await createIdbKVStore("mychat");
-  const api = new NodeApi(nodeBaseUrl());
-  messaging = await Messaging.load({ api, kv });
-  if (!messaging) {
-    setState({ phase: "welcome" });
+  kv = wrapVault(await createIdbKVStore("mychat"));
+  const configured = await isVaultConfigured(kv);
+  setState({ vaultConfigured: configured });
+  if (configured && !isVaultUnlocked()) {
+    setState({ phase: "locked" });
     return;
   }
+  await startApp();
+}
+
+/** 解锁密钥库并进入主界面（锁屏页提交）。 */
+export async function unlockApp(passphrase: string): Promise<boolean> {
+  if (kv === null) return false;
+  try {
+    await unlockVaultInner(kv, passphrase);
+  } catch {
+    return false;
+  }
+  await startApp();
+  return true;
+}
+
+/** 立即锁定：丢弃 KEK 与全部内存态（含 Messaging 实例），回到锁屏。 */
+export function lockApp(): void {
+  stopAutoLock();
+  messaging?.stopRealtime();
+  messaging = null;
+  lockVault();
+  setState({
+    phase: kv !== null && state.vaultConfigured ? "locked" : "welcome",
+    did: null,
+    contacts: [],
+    groups: [],
+    moments: [],
+    friendRequests: [],
+    messages: {},
+    activeDid: null,
+    view: "chat",
+  });
+}
+
+/** 自动锁定监视：用户活动刷新计时，超时锁定（仅 main 态启用）。 */
+function startAutoLock(): void {
+  stopAutoLock();
+  lastActivityAt = Date.now();
+  const refresh = (): void => {
+    lastActivityAt = Date.now();
+  };
+  window.addEventListener("mousemove", refresh, { passive: true });
+  window.addEventListener("keydown", refresh, { passive: true });
+  window.addEventListener("click", refresh, { passive: true });
+  autoLockTimer = setInterval(() => {
+    if (state.phase === "main" && Date.now() - lastActivityAt > AUTO_LOCK_MS) lockApp();
+  }, 30_000);
+}
+
+function stopAutoLock(): void {
+  if (autoLockTimer !== null) {
+    clearInterval(autoLockTimer);
+    autoLockTimer = null;
+  }
+}
+
+/** 已解锁后的装配（load 身份/对账/实时通道）。 */
+async function startApp(): Promise<void> {
+  if (kv === null) return;
+  const api = new NodeApi(nodeBaseUrl());
+  const loaded = await Messaging.load({ api, kv });
+  if (!loaded) {
+    setState({ phase: "welcome", vaultConfigured: await isVaultConfigured(kv) });
+    return;
+  }
+  messaging = loaded;
   messaging.onStateChange = syncFromMessaging;
   bindNotifications();
-  setState({ phase: "main", did: messaging.identity.did });
+  setState({ phase: "main", did: messaging.identity.did, vaultConfigured: await isVaultConfigured(kv) });
   syncFromMessaging();
   // 与节点对账（节点重启/清空后自动重登记与重传，M3 修复）
   try {
@@ -130,6 +204,32 @@ export async function bootstrap(): Promise<void> {
   });
   messaging.startRealtime();
   void messaging.poll();
+  startAutoLock();
+}
+
+// ---------- 口令密钥库操作（加固批次 ①，UI 接入用） ----------
+
+/** 首次设置口令：全量迁移敏感键为加密形态（幂等；已配置则报错）。 */
+export async function setupVaultPassphrase(passphrase: string): Promise<string | null> {
+  if (kv === null || messaging === null) return "应用尚未就绪";
+  try {
+    await setupVaultInner(kv, passphrase);
+    setState({ vaultConfigured: true });
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : "设置失败";
+  }
+}
+
+/** 修改口令：旧口令验证后全量重加密。 */
+export async function changeVaultPassphrase(oldPassphrase: string, newPassphrase: string): Promise<string | null> {
+  if (kv === null || messaging === null) return "应用尚未就绪";
+  try {
+    await changeVaultPassphraseInner(kv, oldPassphrase, newPassphrase);
+    return null;
+  } catch (err) {
+    return err instanceof Error && err.message !== "" ? err.message : "修改失败";
+  }
 }
 
 /** FR-1.1：无感身份创建（UI 仅显示进度动画，无任何用户输入）。 */
