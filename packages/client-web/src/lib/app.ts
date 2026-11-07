@@ -238,6 +238,12 @@ export async function deleteMoment(cid: string): Promise<void> {
   await messaging.deleteMoment(cid);
 }
 
+/** 重置好友圈（加固批次 ③）：换发全新圈密钥，旧密钥从此无法解密新日志。 */
+export async function resetMomentCircle(): Promise<void> {
+  if (!messaging) throw new Error("应用尚未就绪");
+  await messaging.resetMomentCircle();
+}
+
 /** 评论好友动态（v1 仅作者可见）。 */
 export async function commentMoment(authorDid: string, cid: string, text: string): Promise<void> {
   if (!messaging) throw new Error("应用尚未就绪");

@@ -924,14 +924,14 @@ export class Messaging {
   }
 
   /**
-   * 把我的好友圈密钥发给尚未持有它的联系人（加好友后与启动补发共用；
-   * 对方 key 已存在则跳过——v1 不接受对方 key 更新，防重放换钥）。
+   * 把我的好友圈密钥发给联系人（加好友/启动补发/重置后全量重发共用）。
+   * force=true 时对已持有旧密钥的联系人也重发（重置好友圈场景，加固批次 ③）。
    */
-  async distributeMomentKeys(): Promise<void> {
+  async distributeMomentKeys(force = false): Promise<void> {
     await this.ensureMomentKey();
     for (const did of this.contacts.keys()) {
       const held = await this.deps.kv.get(`momentkey:${did}`);
-      if (held !== undefined) continue;
+      if (held !== undefined && !force) continue;
       const session = this.sessions.get(did);
       if (!session) continue;
       try {
@@ -942,6 +942,19 @@ export class Messaging {
         /* 单个分发失败不阻塞其余（下轮补发） */
       }
     }
+  }
+
+  /**
+   * 重置好友圈（加固批次 ③）：换发全新圈密钥并全量重发——旧密钥（含泄露情形）
+   * 从此无法解密新日志；旧动态信箱随 feedId 变化自然废弃。本地缓存与好友端
+   * 已缓存副本不受影响（FR-4.4 固有边界，重置不追溯删除）。
+   */
+  async resetMomentCircle(): Promise<void> {
+    const fresh = base58Encode(generateMomentKey());
+    this.myMomentKey = fresh;
+    await this.deps.kv.put(K_MOMENT_KEY, utf8ToBytes(fresh));
+    await this.distributeMomentKeys(true);
+    this.emit();
   }
 
   /** 发布动态（文字 + 可选图片）：内容块独立密钥 → CAS → 日志条目（好友圈密钥加密）。 */
@@ -1752,9 +1765,9 @@ export class Messaging {
       return null;
     }
     if (payload.type === "circle-keys") {
-      // 好友圈密钥（M3-S12）：已持有则忽略（v1 不接受对方换钥，防重放换钥）
-      const existing = await this.deps.kv.get(`momentkey:${did}`);
-      if (existing === undefined && typeof payload.momentKey === "string") {
+      // 好友圈密钥（M3-S12）：经 1:1 DR 会话到达即发送者认证（重放被 DR 拒绝），
+      // 支持好友随时换钥（重置好友圈，加固批次 ③）——总是接受最新
+      if (typeof payload.momentKey === "string") {
         await this.deps.kv.put(`momentkey:${did}`, utf8ToBytes(payload.momentKey));
       }
       return null;

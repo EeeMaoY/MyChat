@@ -13,6 +13,7 @@ import {
   importAllData,
   listCustodyCopies,
   listMyDevices,
+  resetMomentCircle,
   revokeMyDevice,
   setNotice,
   setReadReceiptsEnabled,
@@ -88,6 +89,7 @@ export default function ProfileModal({ onClose }: Props) {
   const [devices, setDevices] = useState<DeviceRow[] | null>(null);
   const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
   const [revokePending, setRevokePending] = useState(false);
+  const [circleResetPending, setCircleResetPending] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -400,6 +402,33 @@ export default function ProfileModal({ onClose }: Props) {
       )}
       <p className="field-hint">
         吊销后该设备的预密钥材料立即停发，联系人会自动重建会话；被吊销设备需从备份重新导入才能恢复使用。
+      </p>
+
+      {/* 好友圈安全（加固批次 ③） */}
+      <label className="field-label">好友圈安全</label>
+      <div className="inline-row data-row">
+        <button
+          className="btn-ghost"
+          disabled={circleResetPending}
+          onClick={async () => {
+            if (circleResetPending) return;
+            if (!window.confirm("重置将换发全新好友圈密钥：新动态不再可用旧密钥解密（适用于怀疑密钥泄露）。好友将自动收到新密钥。确认重置？")) return;
+            setCircleResetPending(true);
+            try {
+              await resetMomentCircle();
+              setNotice("好友圈密钥已重置并通知全部联系人");
+            } catch (err) {
+              setNotice(err instanceof Error ? err.message : "重置失败");
+            } finally {
+              setCircleResetPending(false);
+            }
+          }}
+        >
+          {circleResetPending ? "重置中…" : "重置好友圈密钥"}
+        </button>
+      </div>
+      <p className="field-hint">
+        怀疑好友圈密钥泄露（如共用设备被他人使用）时重置：新动态只有持有新密钥的好友可读；已缓存的旧动态不受影响。
       </p>
 
       {/* 数据安全：导出/导入（FR-7.2）与好友托管备份（FR-7.3） */}
