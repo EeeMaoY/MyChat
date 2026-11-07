@@ -205,6 +205,20 @@ export class NodeApi {
     return body.events;
   }
 
+  /** 当前 KT Merkle 根（base58）与日志规模。 */
+  async getKtRoot(): Promise<{ size: number; root: string }> {
+    const res = await fetch(`${this.baseUrl}/v0/kt/root`);
+    if (!res.ok) await readError(res);
+    return (await res.json()) as { size: number; root: string };
+  }
+
+  /** 指定序号事件的 Merkle 包含性证明（客户端本地核验用，加固批次 ④）。 */
+  async getKtProof(index: number): Promise<{ proof: { index: number; size: number; leaf: string; path: { sibling: string; isLeft: boolean }[]; root: string } }> {
+    const res = await fetch(`${this.baseUrl}/v0/kt/proof/${index}`);
+    if (!res.ok) await readError(res);
+    return (await res.json()) as { proof: { index: number; size: number; leaf: string; path: { sibling: string; isLeft: boolean }[]; root: string } };
+  }
+
   // ----- Storage: 信箱 -----
 
   async mailboxAppend(mailboxId: string, envelope: Envelope): Promise<number> {

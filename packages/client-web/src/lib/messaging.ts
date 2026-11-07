@@ -450,6 +450,38 @@ export class Messaging {
     return foldDeviceEvents(events);
   }
 
+  /**
+   * KT 日志完整性核验（加固批次 ④，SR-5）：拉取我名下的全部 KT 事件，
+   * 逐事件向节点索取 Merkle 包含性证明并本地验签对当前根。
+   * 检测：事件被删/篡改、根与日志不一致。单节点核验防不了"整体重造日志"
+   * （那需要 M4 多副本交叉核验），边界如实登记。
+   */
+  async verifyKTIntegrity(): Promise<{ ok: boolean; checked: number; detail: string }> {
+    try {
+      const raw = await this.deps.api.getKtEvents(this.identity.did);
+      if (raw.length === 0) return { ok: true, checked: 0, detail: "尚无 KT 事件（未注册用户名/设备）" };
+      const { root } = await this.deps.api.getKtRoot();
+      let checked = 0;
+      for (const e of raw) {
+        const { proof } = await this.deps.api.getKtProof(e.index);
+        const event: KTEvent = {
+          did: e.did,
+          type: e.type as KTEvent["type"],
+          index: e.index,
+          payload: fromBase64(e.payload),
+        };
+        const { ktVerifyInclusion } = await import("@mychat/core");
+        if (!ktVerifyInclusion(event, proof, root)) {
+          return { ok: false, checked, detail: `事件 #${e.index}（${e.type}）包含性验证失败：日志可能被篡改或损坏` };
+        }
+        checked += 1;
+      }
+      return { ok: true, checked, detail: `${checked} 条事件的包含性证明全部验证通过` };
+    } catch (err) {
+      return { ok: false, checked: 0, detail: err instanceof Error ? `核验失败：${err.message}` : "核验失败" };
+    }
+  }
+
   /** 持久化本地 OPK 池。 */
   private async persistOpkPool(): Promise<void> {
     const arr = [...this.opkPool.entries()].map(([id, kp]) => ({ id, ...kpToJson(kp) }));
@@ -1461,6 +1493,9 @@ export class Messaging {
       wrapOk = false;
     }
     checks.push({ name: "身份包裹块可达", ok: wrapOk, detail: wrapOk ? "" : "节点上无法取回包裹块" });
+    // KT 日志完整性（加固批次 ④）：我名下事件的包含性证明逐条核验
+    const kt = await this.verifyKTIntegrity();
+    checks.push({ name: "KT 日志完整性", ok: kt.ok, detail: kt.ok ? kt.detail : kt.detail });
     for (const g of self.guardians) {
       const inContacts = this.contacts.has(g);
       checks.push({ name: `守护者会话有效（${g.slice(11, 22)}…）`, ok: inContacts, detail: inContacts ? "" : "该守护者不在联系人中，恢复时无法联系" });

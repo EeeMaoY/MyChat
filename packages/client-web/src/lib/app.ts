@@ -124,6 +124,10 @@ export async function bootstrap(): Promise<void> {
   } catch {
     /* 对账失败不阻塞进入主界面（刷新页面即重试） */
   }
+  // KT 日志完整性静默核验（加固批次 ④）：异常才警示
+  void messaging.verifyKTIntegrity().then((result) => {
+    if (!result.ok && result.checked > 0) setNotice(`KT 日志核验异常：${result.detail}`);
+  });
   messaging.startRealtime();
   void messaging.poll();
 }
