@@ -4,3 +4,7 @@ coverage/
 *.log
 *.tsbuildinfo
 .DS_Store
+
+# Playwright 产物（M4-S14）
+packages/client-web/test-results/
+packages/client-web/playwright-report/
