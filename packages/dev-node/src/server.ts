@@ -52,6 +52,7 @@ import {
   type StorageStore,
 } from "./storage.ts";
 import { closePersistence, createPersistence, type Persistence, type PersistRecord } from "./persistence.ts";
+import { DEFAULT_LIMITS, RateLimiter, type Limits } from "./limits.ts";
 
 const MAX_BODY = 16 * 1024 * 1024; // 块大小上限 16MB
 const MAILBOX_MAX_ENTRIES = 1000;
@@ -70,6 +71,12 @@ interface NodeState {
   ktlog: KTLogStore;
   relay: RelayHub;
   persistence: Persistence;
+  limits: Limits;
+  limiters: {
+    mailboxAppend: RateLimiter;
+    blockPut: RateLimiter;
+    register: RateLimiter;
+  };
 }
 
 /**
@@ -139,8 +146,61 @@ function replayPersisted(state: NodeState, records: PersistRecord[]): void {
   }
 }
 
+/**
+ * 当前内存态反推为等效记录序列（M4-S13 快照压缩）：重放逻辑复用，单一事实形态。
+ * 已知边界：手动 POST /v0/kt/append 的事件不进快照（自动锚定的 register/device
+ * 事件随记录重建；KT 根链由重放按序重建）。
+ */
+function exportStateAsRecords(state: NodeState): PersistRecord[] {
+  const out: PersistRecord[] = [];
+  for (const record of state.registry.records.values()) {
+    out.push({ t: "register", record: serializeRecord(record) });
+  }
+  for (const [did, entries] of state.devices.devices) {
+    for (const entry of entries.values()) {
+      out.push({ t: "device-add", did, json: entry.certificate });
+      if (entry.revokedAt !== null && entry.revokedJson !== undefined) {
+        const revoked = JSON.parse(entry.certificate) as { dkId: string };
+        out.push({ t: "device-revoke", did, dkId: revoked.dkId, json: entry.revokedJson });
+      }
+    }
+  }
+  for (const [did, byDevice] of state.bundles.bundles) {
+    for (const [dkId, bytes] of byDevice) {
+      out.push({ t: "bundle", did, dkId, bytes: Buffer.from(bytes).toString("base64") });
+    }
+  }
+  for (const [did, byDevice] of state.bundles.opkPools) {
+    for (const [dkId, pool] of byDevice) {
+      out.push({ t: "opks", did, dkId, opks: [...pool.entries()].map(([id, publicKey]) => ({ id, public: publicKey })) });
+    }
+  }
+  for (const [cid, bytes] of state.storage.blocks) {
+    out.push({ t: "block", cid, bytes: Buffer.from(bytes).toString("base64") });
+  }
+  for (const [mailboxId, box] of state.storage.mailboxes) {
+    for (const entry of box.entries) {
+      out.push({ t: "envelope", mailboxId, envelope: envelopeToJson(entry.envelope) });
+    }
+  }
+  for (const [did, json] of state.recovery) {
+    out.push({ t: "recovery", did, json });
+  }
+  return out;
+}
+
 /** 启动 dev 节点（内存态；设置 MYCHAT_DATA_DIR / persistDir 后变更追加 JSONL 并在重启时重放）。 */
-export function startDevNode(opts: { port?: number; host?: string; persistDir?: string } = {}): Promise<DevNode> {
+export function startDevNode(
+  opts: {
+    port?: number;
+    host?: string;
+    persistDir?: string;
+    /** 快照压缩阈值（JSONL 记录数；默认 20000，测试注入小值） */
+    compactThreshold?: number;
+    limits?: Partial<Limits>;
+  } = {},
+): Promise<DevNode> {
+  const limits: Limits = { ...DEFAULT_LIMITS, ...opts.limits };
   const state: NodeState = {
     storage: createStorageStore(),
     registry: createRegistryStore(),
@@ -150,8 +210,21 @@ export function startDevNode(opts: { port?: number; host?: string; persistDir?: 
     ktlog: createKTLogStore(),
     relay: new RelayHub(),
     persistence: createPersistence(opts.persistDir ?? process.env.MYCHAT_DATA_DIR),
+    limits,
+    limiters: {
+      mailboxAppend: new RateLimiter(limits.mailboxAppendPerMin, 60_000),
+      blockPut: new RateLimiter(limits.blockPutPerMin, 60_000),
+      register: new RateLimiter(limits.registerPerMin, 60_000),
+    },
   };
   replayPersisted(state, state.persistence.load());
+
+  // 快照压缩（M4-S13）：记录数超阈值时把内存态反推为快照并轮转 JSONL
+  const compactThreshold = opts.compactThreshold ?? 20_000;
+  if (state.persistence.lastLoadCount() >= compactThreshold) {
+    state.persistence.compact(exportStateAsRecords(state));
+    console.log(`[mychat-dev-node] 持久化快照压缩完成（${state.persistence.lastLoadCount()} 条记录）`);
+  }
 
   const server = createServer((req, res) => {
     // CORS：dev 节点是零信任公共基础设施，浏览器客户端可从任意 origin 访问
@@ -215,6 +288,9 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
   try {
     // ----- Registry -----
     if (req.method === "POST" && url.pathname === "/v0/registry/register") {
+      if (!state.limiters.register.allow("global")) {
+        return sendError(res, 429, "注册请求过于频繁（节点限流）");
+      }
       const body = await readJson(req);
       const record = parseUserNameRecord(body);
       const result = registerRecord(state.registry, record);
@@ -467,8 +543,14 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
     if (parts[1] === "storage" && parts[2] === "blocks" && typeof parts[3] === "string") {
       const cid = decodeURIComponent(parts[3]);
       if (req.method === "PUT") {
+        if (!state.limiters.blockPut.allow("global")) {
+          return sendError(res, 429, "块写入过于频繁（节点限流）");
+        }
         const body = await readBody(req);
         if (body.length === 0) return sendError(res, 400, "空块");
+        if (state.storage.blocks.size >= state.limits.maxBlocks) {
+          return sendError(res, 429, "节点存储配额已满（maxBlocks）");
+        }
         putBlock(state.storage, cid, new Uint8Array(body));
         state.persistence.append({ t: "block", cid, bytes: Buffer.from(new Uint8Array(body)).toString("base64") });
         return sendJson(res, 201, { ok: true });
@@ -495,6 +577,9 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
     if (parts[1] === "storage" && parts[2] === "mailboxes" && typeof parts[3] === "string") {
       const mailboxId = decodeURIComponent(parts[3]);
       if (req.method === "POST" && parts[4] === "append") {
+        if (!state.limiters.mailboxAppend.allow(mailboxId)) {
+          return sendError(res, 429, "信箱写入过于频繁（节点限流）");
+        }
         const body = await readJson(req);
         let envelope;
         try {
