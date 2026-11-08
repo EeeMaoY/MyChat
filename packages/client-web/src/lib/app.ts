@@ -646,22 +646,36 @@ function bindNotifications(): void {
     void did;
   };
   messaging.onIncomingMessage = (message) => {
-    if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
-    if (!document.hidden) return;
-    void getNotificationsEnabled().then((enabled) => {
-      if (!enabled) return;
-      const contact = messaging?.contacts.get(message.did);
-      const notification = new Notification(`MyChat · ${contact?.name ?? "新消息"}`, {
-        body: message.text.slice(0, 80),
-        tag: message.did,
-      });
-      notification.onclick = () => {
-        window.focus();
-        openChat(message.did);
-        notification.close();
-      };
-    });
+    notifySystem(
+      message.did.startsWith("group:")
+        ? `MyChat · ${state.groups.find((g) => `group:${g.groupId}` === message.did)?.name ?? "群聊"}`
+        : `MyChat · ${messaging?.contacts.get(message.did)?.name ?? "新消息"}`,
+      message.text.slice(0, 80),
+      message.did,
+    );
   };
+  // 好友申请通知（M4-S15 通知补全；加密会话内容不出密文层，通知仅提示性）
+  messaging.onFriendRequest = () => {
+    notifySystem("MyChat · 好友申请", "有人请求添加你为好友", "friend-requests");
+  };
+  messaging.onGroupRotated = () => {
+    notifySystem("MyChat · 群更新", "你所在的群有成员或配置变更", "group-rotated");
+  };
+}
+
+/** 系统通知统一入口：权限/开关/页面隐藏三重判定（内容仅摘要，不破坏密文层边界）。 */
+function notifySystem(title: string, body: string, tag: string): void {
+  if (typeof Notification === "undefined" || Notification.permission !== "granted") return;
+  if (!document.hidden) return;
+  void getNotificationsEnabled().then((enabled) => {
+    if (!enabled) return;
+    const notification = new Notification(title, { body, tag });
+    notification.onclick = () => {
+      window.focus();
+      if (tag === "friend-requests") setNotice("你有一条好友申请待确认");
+      notification.close();
+    };
+  });
 }
 
 export async function rehearseRecovery(): Promise<{ ok: boolean; checks: { name: string; ok: boolean; detail: string }[] }> {

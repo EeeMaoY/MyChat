@@ -828,6 +828,8 @@ export class Messaging {
 
   /** 群 epoch 轮换回调（成员变更后 UI 提示）。 */
   onGroupRotated: ((groupId: string, name: string) => void) | null = null;
+  /** 好友申请入队回调（通知用，M4 通知补全）。 */
+  onFriendRequest: ((fromDid: string, name: string | null) => void) | null = null;
 
   /** 群视角持久化（GroupKeysPayloadJson 形态，加载即恢复可解密状态）。 */
   private async persistGroupView(groupId: string): Promise<void> {
@@ -1904,6 +1906,7 @@ export class Messaging {
           } satisfies FriendRequestStored),
         ),
       );
+      this.onFriendRequest?.(handshake.fromDid, handshake.fromName ?? null);
       this.emit();
     } catch {
       // OPK 全部消耗/篡改等失败：忽略（陌生人重放握手被天然拒绝）
