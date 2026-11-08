@@ -13,7 +13,7 @@
  *   envelope  伪地址 / 填充 / 时间桶 / 信封编解码
  *   store     本地持久化抽象（IndexedDB / 内存）
  */
-export const PROTOCOL_VERSION = "0.1.0";
+export const PROTOCOL_VERSION = "0.2.0";
 
 export * from "./protocol/interfaces.ts";
 export * from "./crypto/index.ts";
