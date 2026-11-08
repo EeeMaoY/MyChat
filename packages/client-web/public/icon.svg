@@ -1,0 +1,9 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" role="img" aria-label="MyChat">
+  <!-- MyChat 图标：深色底 + 主蓝对话气泡 + 锁形孔（端到端加密语义） -->
+  <rect width="512" height="512" rx="96" fill="#0f1115"/>
+  <path d="M256 96c-88 0-160 58-160 130 0 40 22 75 58 98l-12 74a10 10 0 0 0 15 11l80-50c6 1 13 1 19 1 88 0 160-58 160-134S344 96 256 96z" fill="#4f8cff"/>
+  <!-- 锁形孔：气泡内的安全语义 -->
+  <rect x="226" y="216" width="60" height="48" rx="8" fill="#0f1115"/>
+  <path d="M240 216v-16a16 16 0 0 1 32 0v16" fill="none" stroke="#0f1115" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="256" cy="240" r="8" fill="#4f8cff"/>
+</svg>

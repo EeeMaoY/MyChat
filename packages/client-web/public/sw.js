@@ -3,6 +3,16 @@
  * 收到 push（节点发送的无 payload 唤醒）→ 展示本地静态通知——内容永不出密文层。
  * 点击通知聚焦/打开应用。
  */
+self.addEventListener("install", () => {
+  // 不做内容缓存：本地权威数据语义（设备副本即权威），离线壳会与真实状态分叉。
+  // 本 SW 仅承载 Web Push 唤醒与 PWA 安装形态。立即生效新版本。
+  self.skipWaiting();
+});
+
+self.addEventListener("activate", (event) => {
+  event.waitUntil(self.clients.claim());
+});
+
 self.addEventListener("push", (event) => {
   event.waitUntil(
     self.registration.showNotification("MyChat", {
