@@ -166,6 +166,8 @@ export interface GroupSummary {
   memberCount: number;
   /** 我是否群主（管理权限判定） */
   amOwner: boolean;
+  /** 成员明细（群成员面板；M4-S15 后续批次） */
+  members: { did: string; role: "owner" | "member"; joinedEpoch: number }[];
 }
 
 /** 动态条目（UI 快照；本地缓存形态，M3-S12）。 */
@@ -735,27 +737,25 @@ export class Messaging {
 
   /** 群条目快照（UI 侧栏/群聊头）。 */
   groupSummaries(): GroupSummary[] {
-    return [...this.groups.values()].map((v) => ({
-      groupId: v.state.groupId,
-      name: v.state.name,
-      owner: v.state.owner,
-      epoch: v.state.epoch,
-      memberCount: v.state.members.length,
-      amOwner: v.state.owner === this.identity.did,
-    }));
+    return [...this.groups.values()].map((v) => this.toGroupSummary(v.state));
   }
 
   /** 单群实时摘要（群聊头直读，绕过快照异步间隙——M4-S15 e2e 定位的渲染时序缺陷）。 */
   getGroupSummary(groupId: string): GroupSummary | null {
     const v = this.groups.get(groupId);
-    if (v === undefined) return null;
+    return v === undefined ? null : this.toGroupSummary(v.state);
+  }
+
+  /** GroupState → UI 摘要（含成员明细）。 */
+  private toGroupSummary(state: import("@mychat/core").GroupState): GroupSummary {
     return {
-      groupId: v.state.groupId,
-      name: v.state.name,
-      owner: v.state.owner,
-      epoch: v.state.epoch,
-      memberCount: v.state.members.length,
-      amOwner: v.state.owner === this.identity.did,
+      groupId: state.groupId,
+      name: state.name,
+      owner: state.owner,
+      epoch: state.epoch,
+      memberCount: state.members.length,
+      amOwner: state.owner === this.identity.did,
+      members: state.members.map((m) => ({ did: m.did, role: m.role, joinedEpoch: m.joinedEpoch })),
     };
   }
 

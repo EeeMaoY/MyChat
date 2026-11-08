@@ -266,3 +266,34 @@ test("共享评论：B 评论 A 的动态 → A 与好友 C 均可见（好友�
   await expect(cathy.getByText("共享评论的动态").first()).toBeVisible({ timeout: 20_000 });
   await expect(cathy.getByText("bob 的共享评论").first()).toBeVisible({ timeout: 20_000 });
 });
+test("群成员面板：查看成员 → 移除成员（面板化操作替代 prompt）", async ({ browser }) => {
+  const alice = await newUser(browser, "e2e_aliceA");
+  const bob = await newUser(browser, "e2e_bobA");
+  const cathy = await newUser(browser, "e2e_cathyA");
+  for (const [friendPage, friendName] of [[bob, "e2e_bobA"], [cathy, "e2e_cathyA"]] as const) {
+    await alice.locator(".sidebar").getByRole("button", { name: "➕ 加好友" }).click();
+    await alice.getByPlaceholder("对方的 MyChat 用户名").fill(friendName);
+    await alice.getByRole("button", { name: "发送好友请求" }).click();
+    await expect(friendPage.getByText("请求添加你为好友").first()).toBeVisible({ timeout: 15_000 });
+    await friendPage.getByRole("button", { name: "通过", exact: true }).click();
+  }
+  await alice.getByRole("button", { name: "👥 建群" }).click();
+  await alice.locator("#group-name").fill("面板测试群");
+  await alice.locator(".guardian-item").filter({ hasText: "e2e_bobA" }).locator("input[type=checkbox]").check();
+  await alice.locator(".guardian-item").filter({ hasText: "e2e_cathyA" }).locator("input[type=checkbox]").check();
+  await alice.getByRole("button", { name: "创建群聊" }).click();
+  await expect(alice.getByText("群「面板测试群」已创建").first()).toBeVisible({ timeout: 10_000 });
+  await alice.locator(".contact-item").filter({ hasText: "面板测试群" }).click();
+
+  // 打开成员面板：3 位成员、群主标注、操作按钮
+  await alice.getByRole("button", { name: "成员", exact: true }).click();
+  await expect(alice.getByText("群成员 · 面板测试群")).toBeVisible({ timeout: 10_000 });
+  await expect(alice.locator(".guardian-item").filter({ hasText: "群主" })).toHaveCount(1);
+  // 移除 bob（confirm 自动接受）
+  const bobItem = alice.locator(".guardian-item").filter({ hasText: "e2e_bobA" });
+  alice.once("dialog", (d) => d.accept());
+  await bobItem.getByRole("button", { name: "移除", exact: true }).click();
+  // 断言最终状态（notice 有 5s 清除窗口，时序脆弱）：成员计数 3→2、面板 bob 条目消失
+  await expect(alice.getByText("2 位成员").first()).toBeVisible({ timeout: 20_000 });
+  await expect(alice.locator(".guardian-item").filter({ hasText: "e2e_bobA" })).toHaveCount(0, { timeout: 10_000 });
+});

@@ -20,6 +20,8 @@ interface Props {
   onBack: () => void;
   /** 空态引导里的加好友入口。 */
   onAddFriend: () => void;
+  /** 群成员面板入口（M4-S15 后续批次）。 */
+  onOpenMembers: (groupId: string) => void;
 }
 
 /** 输入框自适应高度上限（与 CSS max-height 一致）。 */
@@ -55,7 +57,7 @@ function ReceiptBadge({ status }: { status: ChatMessage["status"] }) {
   );
 }
 
-export default function ChatPanel({ onBack, onAddFriend }: Props) {
+export default function ChatPanel({ onBack, onAddFriend, onOpenMembers }: Props) {
   const state = useAppState();
   const did = state.activeDid;
 
@@ -233,6 +235,9 @@ export default function ChatPanel({ onBack, onAddFriend }: Props) {
         </div>
         {isGroupChat && group !== undefined && (
           <span className="chat-group-actions">
+            <button className="btn-ghost" onClick={() => onOpenMembers(group.groupId)} title="查看群成员">
+              成员
+            </button>
             {group.amOwner ? (
               <>
                 <button

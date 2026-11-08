@@ -7,6 +7,7 @@ import AddFriendModal from "../components/AddFriendModal";
 import ChatPanel from "../components/ChatPanel";
 import ContactSidebar from "../components/ContactSidebar";
 import CreateGroupModal from "../components/CreateGroupModal";
+import GroupMembersModal from "../components/GroupMembersModal";
 import FriendRequestBanner from "../components/FriendRequestBanner";
 import PassphraseModal from "../components/PassphraseModal";
 import ProfileModal from "../components/ProfileModal";
@@ -19,6 +20,7 @@ export default function MainPage() {
   const [showAddFriend, setShowAddFriend] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
   const [showCreateGroup, setShowCreateGroup] = useState(false);
+  const [membersGroupId, setMembersGroupId] = useState<string | null>(null);
   const [showPassphrase, setShowPassphrase] = useState(false);
 
   return (
@@ -36,8 +38,13 @@ export default function MainPage() {
         {state.view === "timeline" ? (
           <TimelinePage onBack={() => openChatView()} />
         ) : (
-          <ChatPanel onBack={() => openChat(null)} onAddFriend={() => setShowAddFriend(true)} />
+          <ChatPanel
+            onBack={() => openChat(null)}
+            onAddFriend={() => setShowAddFriend(true)}
+            onOpenMembers={(groupId) => setMembersGroupId(groupId)}
+          />
         )}
+        {membersGroupId !== null && <GroupMembersModal groupId={membersGroupId} onClose={() => setMembersGroupId(null)} />}
         {showAddFriend && <AddFriendModal onClose={() => setShowAddFriend(false)} />}
         {showProfile && (
           <ProfileModal onClose={() => setShowProfile(false)} onSetupPassphrase={() => { setShowProfile(false); setShowPassphrase(true); }} />
