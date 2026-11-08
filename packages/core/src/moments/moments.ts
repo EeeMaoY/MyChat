@@ -33,19 +33,19 @@ export function momentFeedId(momentKey: Uint8Array): string {
   return base58Encode(hkdfSha256(momentKey, new Uint8Array(0), FEED_ID_PREFIX));
 }
 
-/** 动态日志条目（AEAD 明文形态；post 携带内容指针，delete 携带墓碑目标，like 携带被赞目标）。 */
+/** 动态日志条目（AEAD 明文形态；post/comment 携带内容指针，delete 携带墓碑目标，like/comment 携带目标动态）。 */
 export interface FeedEntry {
   v: 1;
-  type: "post" | "delete" | "like";
-  /** post = 动态内容块 CID；delete = 被删动态的块 CID；like = ""（点赞无内容块） */
+  type: "post" | "delete" | "like" | "comment";
+  /** post/comment = 评论/动态内容块 CID；delete = 被删动态的块 CID；like = ""（点赞无内容块） */
   cid: string;
-  /** like 专用：被赞动态的内容块 CID（post/delete 不带；进入签名域，篡改必被验签拒绝） */
+  /** like/comment 专用：被赞/被评动态的内容块 CID（进入签名域，篡改必被验签拒绝） */
   targetCid?: string;
   /** 作者 DID（验签公钥来源） */
   authorDid: string;
-  /** post 时为动态内容密钥（base58） */
+  /** post/comment 时为内容密钥（base58） */
   contentKey?: string;
-  /** post 时为 AEAD nonce（base58） */
+  /** post/comment 时为 AEAD nonce（base58） */
   nonce?: string;
   at: number;
   /** 作者 IK 签名（64B，覆盖除 signature 外全部字段） */
@@ -54,9 +54,9 @@ export interface FeedEntry {
 
 export interface UnsignedFeedEntry {
   v: 1;
-  type: "post" | "delete" | "like";
+  type: "post" | "delete" | "like" | "comment";
   cid: string;
-  /** like 专用：被赞动态的内容块 CID */
+  /** like/comment 专用：被赞/被评动态的内容块 CID */
   targetCid?: string;
   authorDid: string;
   contentKey?: string;
@@ -137,10 +137,15 @@ function entryToJson(e: FeedEntry): Record<string, unknown> {
 }
 
 function entryFromJson(raw: Record<string, unknown>): FeedEntry {
-  if (raw.v !== 1 || (raw.type !== "post" && raw.type !== "delete" && raw.type !== "like") || typeof raw.cid !== "string") {
+  if (
+    raw.v !== 1 ||
+    (raw.type !== "post" && raw.type !== "delete" && raw.type !== "like" && raw.type !== "comment") ||
+    typeof raw.cid !== "string" ||
+    typeof raw.authorDid !== "string" ||
+    typeof raw.signature !== "string"
+  ) {
     throw new Error("动态日志条目字段非法");
   }
-  if (typeof raw.authorDid !== "string" || typeof raw.signature !== "string") throw new Error("动态日志条目字段非法");
   if (typeof raw.at !== "number") throw new Error("动态日志条目时间字段非法");
   const entry: FeedEntry = {
     v: 1,
@@ -159,6 +164,14 @@ function entryFromJson(raw: Record<string, unknown>): FeedEntry {
   if (typeof raw.targetCid === "string") entry.targetCid = raw.targetCid;
   // 语义硬校验：点赞条目必须指向被赞动态（在验签前即拒绝，无需浪费验签）
   if (entry.type === "like" && entry.targetCid === undefined) throw new Error("点赞条目缺少目标动态");
+  // 语义硬校验：评论条目必须指向被评动态且携带评论内容块
+  if (entry.type === "comment" && (entry.targetCid === undefined || entry.contentKey === undefined || entry.nonce === undefined)) {
+    throw new Error("评论条目缺少目标动态或内容指针");
+  }
+  // 语义硬校验：评论条目必须指向被评动态且携带评论内容块
+  if (entry.type === "comment" && (entry.targetCid === undefined || entry.contentKey === undefined || entry.nonce === undefined)) {
+    throw new Error("评论条目缺少目标动态或内容指针");
+  }
   if (entry.signature.length !== SIGNATURE_LENGTH) throw new Error("动态日志条目签名长度非法");
   return entry;
 }

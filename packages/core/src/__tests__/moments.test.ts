@@ -231,3 +231,59 @@ describe("点赞条目（like：targetCid 进入签名域）", () => {
     expect(() => openFeedEntry(generateMomentKey(), sealFeedEntry(key, like))).toThrow();
   });
 });
+describe("评论条目（comment：好友圈共享，内容块 + targetCid 进签名域）", () => {
+  it("评论条目签发加密封装往返（含 targetCid 与内容指针还原）", () => {
+    const key = generateMomentKey();
+    const commenter = createIdentity();
+    const entry = makeMomentEntry(commenter.ikEd.privateKey, {
+      v: 1,
+      type: "comment",
+      cid: "bafk-comment-block",
+      authorDid: commenter.did,
+      contentKey: "CK1",
+      nonce: "N1",
+      targetCid: "bafk-target",
+      at: 1700000000000,
+    });
+    const sealed = sealFeedEntry(key, entry);
+    expect(openFeedEntry(key, sealed)).toEqual(entry);
+    expect(() => openFeedEntry(generateMomentKey(), sealed)).toThrow();
+  });
+
+  it("冒名评论（签名者≠声明作者）与篡改 targetCid 被验签拒绝", () => {
+    const key = generateMomentKey();
+    const realAuthor = createIdentity();
+    const mallory = createIdentity();
+    const forged = makeMomentEntry(mallory.ikEd.privateKey, {
+      v: 1, type: "comment", cid: "bafk-c", authorDid: realAuthor.did, contentKey: "CK", nonce: "N", targetCid: "bafk-t", at: 1,
+    });
+    expect(() => openFeedEntry(key, sealFeedEntry(key, forged))).toThrow(/签名验证失败/);
+    const author = createIdentity();
+    const entry = makeMomentEntry(author.ikEd.privateKey, {
+      v: 1, type: "comment", cid: "bafk-c", authorDid: author.did, contentKey: "CK", nonce: "N", targetCid: "bafk-t", at: 1,
+    });
+    expect(() => openFeedEntry(key, sealFeedEntry(key, { ...entry, targetCid: "bafk-evil" }))).toThrow(/签名验证失败/);
+  });
+
+  it("comment 缺 targetCid 或内容指针被语义校验拒绝", () => {
+    const key = generateMomentKey();
+    const author = createIdentity();
+    const missingTarget = makeMomentEntry(author.ikEd.privateKey, {
+      v: 1, type: "comment", cid: "bafk-c", authorDid: author.did, contentKey: "CK", nonce: "N", at: 1,
+    });
+    expect(() => openFeedEntry(key, sealFeedEntry(key, missingTarget))).toThrow(/缺少目标动态或内容指针/);
+    const missingContent = makeMomentEntry(author.ikEd.privateKey, {
+      v: 1, type: "comment", cid: "bafk-c", authorDid: author.did, targetCid: "bafk-t", at: 1,
+    });
+    expect(() => openFeedEntry(key, sealFeedEntry(key, missingContent))).toThrow(/缺少目标动态或内容指针/);
+  });
+
+  it("旧形态 post 条目在新守卫下往返不受影响（comment 守卫不误伤）", () => {
+    const key = generateMomentKey();
+    const author = createIdentity();
+    const entry = makeMomentEntry(author.ikEd.privateKey, {
+      v: 1, type: "post", cid: "bafk-p", authorDid: author.did, contentKey: "CK", nonce: "N", at: 5,
+    });
+    expect(openFeedEntry(key, sealFeedEntry(key, entry))).toEqual(entry);
+  });
+});
