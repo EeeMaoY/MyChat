@@ -213,6 +213,7 @@ type SessionPayload =
   | { v: 1; type: "group-leave"; groupId: string }
   /** 动态（FR-4.x，M3-S12）：好友圈密钥分发 / 动态评论（仅作者可见） */
   | { v: 1; type: "circle-keys"; momentKey: string }
+  /** v1 遗留形态（仅作者可见）；v0.2 起评论走作者日志共享——解析分支保留兼容旧消息 */
   | { v: 1; type: "moment-comment"; cid: string; text: string };
 
 /** 开放备份包格式（FR-7.2；明文 JSON，导出文件的保管责任在用户，UX-7 披露） */
@@ -1112,13 +1113,30 @@ export class Messaging {
     this.emit();
   }
 
-  /** 评论好友动态（v1：经 1:1 会话仅作者可见，M3 计划 §6.5）。 */
+  /**
+   * 评论好友动态（v0.2 共享化，FR-4.3）：评论文本为独立内容块，评论条目 append 到
+   * **作者日志**（好友圈共享——可见性集合内成员均可聚合阅读，替代 v1 的"仅作者可见"）。
+   * 幂等由内容块 CID 去重承担（同文本重复评论产生不同块，属正常多评论）。
+   */
   async commentMoment(authorDid: string, cid: string, text: string): Promise<void> {
-    const session = this.sessions.get(authorDid);
-    if (!session) throw new Error("与该作者的会话不存在");
-    const wire = sessionSend(session, utf8ToBytes(JSON.stringify({ v: 1, type: "moment-comment", cid, text } satisfies SessionPayload)));
-    const mailboxId = sessionMailbox(session, "send", Date.now());
-    await this.deps.api.mailboxAppend(mailboxId, this.seal(wire, mailboxId));
+    const keyRaw = await this.deps.kv.get(`momentkey:${authorDid}`);
+    if (keyRaw === undefined) throw new Error("未持有作者的好友圈密钥（等待同步）");
+    const authorKey = base58Decode(bytesToUtf8(keyRaw));
+    const feedId = momentFeedId(authorKey);
+    // 评论文本块（独立内容密钥，与动态内容块同构）
+    const block = createMomentBlock({ v: 1, text });
+    await this.deps.api.putBlock(block.cid, block.block);
+    const entry = makeMomentEntry(this.identity.ikEd.privateKey, {
+      v: 1,
+      type: "comment",
+      cid: block.cid,
+      authorDid: this.identity.did,
+      contentKey: block.contentKey,
+      nonce: block.nonce,
+      targetCid: cid,
+      at: Date.now(),
+    });
+    await this.deps.api.mailboxAppend(feedId, this.seal(sealFeedEntry(authorKey, entry), feedId));
     this.emit();
   }
 
@@ -1178,17 +1196,38 @@ export class Messaging {
       for (const envelope of myResult.envelopes) {
         try {
           const entry = openFeedEntry(myKey, stripPadding(envelope.payload));
-          if (entry.type !== "like" || entry.targetCid === undefined) continue;
-          const likedKey = `moment:${this.identity.did}:${entry.targetCid}`;
-          const likedRaw = await this.deps.kv.get(likedKey);
-          if (likedRaw !== undefined) {
-            const item = JSON.parse(bytesToUtf8(likedRaw)) as MomentItem;
-            item.likes = item.likes ?? [];
-            if (!item.likes.includes(entry.authorDid)) {
-              item.likes.push(entry.authorDid);
-              await this.deps.kv.put(likedKey, utf8ToBytes(JSON.stringify(item)));
-              this.emit();
+          // 自己日志的互动聚合：like（点赞者）与 comment（评论者）条目，作者即日志主人
+          if (entry.type === "like" && entry.targetCid !== undefined) {
+            const likedKey = `moment:${this.identity.did}:${entry.targetCid}`;
+            const likedRaw = await this.deps.kv.get(likedKey);
+            if (likedRaw !== undefined) {
+              const item = JSON.parse(bytesToUtf8(likedRaw)) as MomentItem;
+              item.likes = item.likes ?? [];
+              if (!item.likes.includes(entry.authorDid)) {
+                item.likes.push(entry.authorDid);
+                await this.deps.kv.put(likedKey, utf8ToBytes(JSON.stringify(item)));
+                this.emit();
+              }
             }
+            continue;
+          }
+          if (entry.type === "comment" && entry.targetCid !== undefined && entry.contentKey !== undefined && entry.nonce !== undefined) {
+            const commentedKey = `moment:${this.identity.did}:${entry.targetCid}`;
+            const commentedRaw = await this.deps.kv.get(commentedKey);
+            if (commentedRaw !== undefined) {
+              const item = JSON.parse(bytesToUtf8(commentedRaw)) as MomentItem;
+              const block = await this.deps.api.getBlock(entry.cid);
+              if (block !== null) {
+                const payload = openMomentBlock(block, entry.contentKey, entry.nonce);
+                item.comments = item.comments ?? [];
+                if (!item.comments.some((c) => c.fromDid === entry.authorDid && c.text === payload.text)) {
+                  item.comments.push({ fromDid: entry.authorDid, text: payload.text, at: entry.at });
+                  await this.deps.kv.put(commentedKey, utf8ToBytes(JSON.stringify(item)));
+                  this.emit();
+                }
+              }
+            }
+            continue;
           }
         } catch {
           /* 伪造/篡改：安全丢弃 */
@@ -1218,6 +1257,25 @@ export class Messaging {
                 item.likes.push(entry.authorDid);
                 await this.deps.kv.put(likedKey, utf8ToBytes(JSON.stringify(item)));
                 this.emit();
+              }
+            }
+            continue;
+          }
+          // 评论条目：作者即评论者（好友圈共享），聚合到被评动态
+          if (entry.type === "comment" && entry.targetCid !== undefined && entry.contentKey !== undefined && entry.nonce !== undefined) {
+            const commentedKey = `moment:${did}:${entry.targetCid}`;
+            const commentedRaw = await this.deps.kv.get(commentedKey);
+            if (commentedRaw !== undefined) {
+              const item = JSON.parse(bytesToUtf8(commentedRaw)) as MomentItem;
+              const block = await this.deps.api.getBlock(entry.cid);
+              if (block !== null) {
+                const payload = openMomentBlock(block, entry.contentKey, entry.nonce);
+                item.comments = item.comments ?? [];
+                if (!item.comments.some((c) => c.fromDid === entry.authorDid && c.text === payload.text)) {
+                  item.comments.push({ fromDid: entry.authorDid, text: payload.text, at: entry.at });
+                  await this.deps.kv.put(commentedKey, utf8ToBytes(JSON.stringify(item)));
+                  this.emit();
+                }
               }
             }
             continue;
