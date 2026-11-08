@@ -235,3 +235,34 @@ test("动态点赞：B 点赞 A 的动态 → A 侧计数 +1", async ({ browser 
   // A 侧计数出现（like 条目经 A 日志拉取聚合）
   await expect(alice.getByText("❤️ 1")).toBeVisible({ timeout: 20_000 });
 });
+test("共享评论：B 评论 A 的动态 → A 与好友 C 均可见（好友圈共享，v0.2）", async ({ browser }) => {
+  const alice = await newUser(browser, "e2e_alice9");
+  const bob = await newUser(browser, "e2e_bob9");
+  const cathy = await newUser(browser, "e2e_cathy9");
+  // alice 与 bob/cathy 互为好友（评论可见性 = 好友圈）
+  for (const [friendPage, friendName] of [[bob, "e2e_bob9"], [cathy, "e2e_cathy9"]] as const) {
+    await alice.locator(".sidebar").getByRole("button", { name: "➕ 加好友" }).click();
+    await alice.getByPlaceholder("对方的 MyChat 用户名").fill(friendName);
+    await alice.getByRole("button", { name: "发送好友请求" }).click();
+    await expect(friendPage.getByText("请求添加你为好友").first()).toBeVisible({ timeout: 15_000 });
+    await friendPage.getByRole("button", { name: "通过", exact: true }).click();
+  }
+  // alice 发布动态（好友圈：bob/cathy 持圈密钥）
+  await alice.getByRole("button", { name: "📱 动态" }).click();
+  await alice.locator(".timeline-composer textarea").fill("共享评论的动态");
+  await alice.getByRole("button", { name: "发布", exact: true }).click();
+  await expect(alice.getByText("共享评论的动态").first()).toBeVisible({ timeout: 10_000 });
+
+  // bob 评论（留言框 + 发送）
+  await bob.getByRole("button", { name: "📱 动态" }).click();
+  await expect(bob.getByText("共享评论的动态").first()).toBeVisible({ timeout: 20_000 });
+  await bob.getByRole("button", { name: "留言", exact: true }).click();
+  await bob.locator(".moment-card input.input").fill("bob 的共享评论");
+  await bob.locator(".moment-card").filter({ hasText: "共享评论的动态" }).getByRole("button", { name: "发送", exact: true }).click();
+
+  // 作者侧与另一好友侧都聚合到评论（作者日志共享语义）
+  await expect(alice.getByText("bob 的共享评论").first()).toBeVisible({ timeout: 20_000 });
+  await cathy.getByRole("button", { name: "📱 动态" }).click();
+  await expect(cathy.getByText("共享评论的动态").first()).toBeVisible({ timeout: 20_000 });
+  await expect(cathy.getByText("bob 的共享评论").first()).toBeVisible({ timeout: 20_000 });
+});
