@@ -10,6 +10,7 @@ import {
   decryptAttachment,
   feedEntryMessage,
   generateMomentKey,
+  isLikeEntry,
   makeMomentEntry,
   momentFeedId,
   openFeedEntry,
@@ -135,5 +136,98 @@ describe("动态内容块", () => {
     expect(opened.text).toBe("看图");
     expect(opened.attachment?.cid).toBe(img.cid);
     expect(decryptAttachment({ ciphertext: img.ciphertext, contentKey: img.contentKey, nonce: img.nonce })).toEqual(imageBytes);
+  });
+});
+
+describe("点赞条目（like：targetCid 进入签名域）", () => {
+  it("like 条目签发加密封装往返；targetCid 还原一致", () => {
+    const key = generateMomentKey();
+    const author = createIdentity();
+    const like = makeMomentEntry(author.ikEd.privateKey, {
+      v: 1,
+      type: "like",
+      cid: "", // 点赞无内容块
+      authorDid: author.did,
+      targetCid: "bafk-target-post",
+      at: 1700000000002,
+    });
+    expect(isLikeEntry(like)).toBe(true);
+    const opened = openFeedEntry(key, sealFeedEntry(key, like));
+    expect(opened).toEqual(like);
+    expect(opened.targetCid).toBe("bafk-target-post");
+  });
+
+  it("签名域覆盖 targetCid：同签名改被赞目标 → 验签拒绝", () => {
+    const key = generateMomentKey();
+    const author = createIdentity();
+    const entry = makeMomentEntry(author.ikEd.privateKey, {
+      v: 1,
+      type: "like",
+      cid: "",
+      authorDid: author.did,
+      targetCid: "bafk-real-target",
+      at: 1700000000003,
+    });
+    // 以真实签名 + 篡改 targetCid 重封（签名域编码含 targetCid 标志位与本体，篡改必死）
+    const tampered: FeedEntry = { ...entry, targetCid: "bafk-evil-target" };
+    expect(() => openFeedEntry(key, sealFeedEntry(key, tampered))).toThrow(/签名验证失败/);
+  });
+
+  it("like 条目冒名作者（签名者≠声明作者）被拒绝", () => {
+    const key = generateMomentKey();
+    const realAuthor = createIdentity();
+    const mallory = createIdentity();
+    // mallory 签名但声明 authorDid 为 realAuthor（加固②行为在 like 类型上同样成立）
+    const forged = makeMomentEntry(mallory.ikEd.privateKey, {
+      v: 1,
+      type: "like",
+      cid: "",
+      authorDid: realAuthor.did,
+      targetCid: "bafk-target",
+      at: 1700000000004,
+    });
+    expect(() => openFeedEntry(key, sealFeedEntry(key, forged))).toThrow(/签名验证失败/);
+  });
+
+  it("向后兼容：无 targetCid 的旧形态 post 条目往返一致，编码与显式 undefined 逐字节一致", () => {
+    const key = generateMomentKey();
+    const author = createIdentity();
+    const fields = {
+      v: 1 as const,
+      type: "post" as const,
+      cid: "bafk-old",
+      authorDid: author.did,
+      contentKey: "CK",
+      nonce: "N",
+      at: 1700000000005,
+    };
+    const entry = makeMomentEntry(author.ikEd.privateKey, fields);
+    expect("targetCid" in entry).toBe(false); // 旧形态不带 targetCid 字段
+    expect(isLikeEntry(entry)).toBe(false);
+    expect(openFeedEntry(key, sealFeedEntry(key, entry))).toEqual(entry);
+    // 缺省与显式 undefined 编码逐字节一致：targetCid 标志位恒 0，旧条目形态稳定
+    expect(feedEntryMessage(fields)).toEqual(feedEntryMessage({ ...fields, targetCid: undefined }));
+  });
+
+  it("语义校验：like 条目缺 targetCid 被拒绝", () => {
+    const key = generateMomentKey();
+    const author = createIdentity();
+    // 构造缺 targetCid 的 like 条目（类型允许缺省，解析层语义硬校验拒绝）
+    const bogus = makeMomentEntry(author.ikEd.privateKey, { v: 1, type: "like", cid: "", authorDid: author.did, at: 1700000000006 });
+    expect(() => openFeedEntry(key, sealFeedEntry(key, bogus))).toThrow(/缺少目标动态/);
+  });
+
+  it("非好友密钥解不开 like 条目", () => {
+    const key = generateMomentKey();
+    const author = createIdentity();
+    const like = makeMomentEntry(author.ikEd.privateKey, {
+      v: 1,
+      type: "like",
+      cid: "",
+      authorDid: author.did,
+      targetCid: "bafk-target",
+      at: 1700000000007,
+    });
+    expect(() => openFeedEntry(generateMomentKey(), sealFeedEntry(key, like))).toThrow();
   });
 });

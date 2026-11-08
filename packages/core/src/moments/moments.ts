@@ -3,9 +3,10 @@
  *
  * 模型（EDS-min：只做动态日志与能力包裹，完整 EDS 属后续里程碑）：
  * - 好友圈密钥 momentKey（32B，作者与好友持有，经 1:1 会话分发）派生动态信箱 ID；
- * - 动态信箱 = append-only 动态日志：条目（post/delete）以 momentKey AEAD 加密；
+ * - 动态信箱 = append-only 动态日志：条目（post/delete/like）以 momentKey AEAD 加密；
  * - 每条动态独立内容密钥（encryptAttachment 模式）：文字与图片引用一起入块，
- *   块 CID 经日志条目分发；删除 = 墓碑条目 + 物理删块（客户端语义为准）。
+ *   块 CID 经日志条目分发；删除 = 墓碑条目 + 物理删块（客户端语义为准）；
+ * - 点赞（like）不产生内容块：cid 置空串、无内容密钥，以 targetCid 指向被赞动态的内容块 CID。
  *
  * 作者性（加固批次 ②）：日志信箱是节点公共 append（知道 feedId 即可投递），
  * 对称圈密钥无法提供作者性——**每条目带 IK 签名**（覆盖全部业务字段），读取时
@@ -32,12 +33,14 @@ export function momentFeedId(momentKey: Uint8Array): string {
   return base58Encode(hkdfSha256(momentKey, new Uint8Array(0), FEED_ID_PREFIX));
 }
 
-/** 动态日志条目（AEAD 明文形态；post 携带内容指针，delete 携带墓碑目标）。 */
+/** 动态日志条目（AEAD 明文形态；post 携带内容指针，delete 携带墓碑目标，like 携带被赞目标）。 */
 export interface FeedEntry {
   v: 1;
-  type: "post" | "delete";
-  /** post = 动态内容块 CID；delete = 被删动态的块 CID */
+  type: "post" | "delete" | "like";
+  /** post = 动态内容块 CID；delete = 被删动态的块 CID；like = ""（点赞无内容块） */
   cid: string;
+  /** like 专用：被赞动态的内容块 CID（post/delete 不带；进入签名域，篡改必被验签拒绝） */
+  targetCid?: string;
   /** 作者 DID（验签公钥来源） */
   authorDid: string;
   /** post 时为动态内容密钥（base58） */
@@ -51,8 +54,10 @@ export interface FeedEntry {
 
 export interface UnsignedFeedEntry {
   v: 1;
-  type: "post" | "delete";
+  type: "post" | "delete" | "like";
   cid: string;
+  /** like 专用：被赞动态的内容块 CID */
+  targetCid?: string;
   authorDid: string;
   contentKey?: string;
   nonce?: string;
@@ -67,6 +72,10 @@ export function feedEntryMessage(fields: UnsignedFeedEntry): Uint8Array {
     prefixed(fields.cid),
     prefixed(fields.authorDid),
     uint64(fields.at),
+    // targetCid 有无标志位（1B，like 条目专用）与本体位于 contentKey 标志位之前；
+    // 旧形态条目无 targetCid，标志位恒 0，编码确定不受影响。
+    new Uint8Array([fields.targetCid !== undefined ? 1 : 0]),
+    ...(fields.targetCid !== undefined ? [prefixed(fields.targetCid)] : []),
     new Uint8Array([fields.contentKey !== undefined ? 1 : 0]),
   );
   if (fields.contentKey === undefined || fields.nonce === undefined) return head;
@@ -122,12 +131,13 @@ function entryToJson(e: FeedEntry): Record<string, unknown> {
     authorDid: e.authorDid,
     at: e.at,
     ...(e.contentKey !== undefined && e.nonce !== undefined ? { contentKey: e.contentKey, nonce: e.nonce } : {}),
+    ...(e.targetCid !== undefined ? { targetCid: e.targetCid } : {}),
     signature: base58Encode(e.signature),
   };
 }
 
 function entryFromJson(raw: Record<string, unknown>): FeedEntry {
-  if (raw.v !== 1 || (raw.type !== "post" && raw.type !== "delete") || typeof raw.cid !== "string") {
+  if (raw.v !== 1 || (raw.type !== "post" && raw.type !== "delete" && raw.type !== "like") || typeof raw.cid !== "string") {
     throw new Error("动态日志条目字段非法");
   }
   if (typeof raw.authorDid !== "string" || typeof raw.signature !== "string") throw new Error("动态日志条目字段非法");
@@ -144,8 +154,18 @@ function entryFromJson(raw: Record<string, unknown>): FeedEntry {
     entry.contentKey = raw.contentKey;
     entry.nonce = raw.nonce;
   }
+  // 解析层宽容：targetCid 为可选字段，post/delete 带了该字段值也照存——与 like 的一致性
+  // 语义由签名域编码保证（有无标志位进入签名，篡改必被验签拒绝）。
+  if (typeof raw.targetCid === "string") entry.targetCid = raw.targetCid;
+  // 语义硬校验：点赞条目必须指向被赞动态（在验签前即拒绝，无需浪费验签）
+  if (entry.type === "like" && entry.targetCid === undefined) throw new Error("点赞条目缺少目标动态");
   if (entry.signature.length !== SIGNATURE_LENGTH) throw new Error("动态日志条目签名长度非法");
   return entry;
+}
+
+/** 便捷谓词：是否为点赞条目（type 为 like 且携带被赞目标）。 */
+export function isLikeEntry(entry: FeedEntry): boolean {
+  return entry.type === "like" && entry.targetCid !== undefined;
 }
 
 /** 动态内容块明文（图片以引用形式与文字同块，图片本体另为独立 CAS 块）。 */
