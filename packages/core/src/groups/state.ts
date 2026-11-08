@@ -3,8 +3,9 @@
  *
  * 信任模型：群主签发权威清单，经群信箱广播与 1:1 会话同步；成员客户端
  * 本地验签后才采信（SR-5 惯例：节点存储与转发不代表可信）。
- * **成员变更即 epoch+1**：入群（history: new-only，新成员不见加入前消息）与
- * 移除/退群（断读：被移除者拿不到新 epoch 的群秘密与发送密钥，FR-6.2）统一由
+ * **任何状态变更即 epoch+1**（v1 设计决定：编排层复用统一的 SK 重分发路径）：
+ * 入群（history: new-only，新成员不见加入前消息）、移除/退群（断读：被移除者
+ * 拿不到新 epoch 的群秘密与发送密钥，FR-6.2）、群主转让与群改名，统一由
  * epoch 推进表达。
  *
  * 签名覆盖确定性编码（与 username/certificate 同一惯例）：
@@ -37,7 +38,7 @@ export interface GroupState {
   groupId: string;
   name: string;
   owner: string;
-  /** 从 1 起单调递增；每次成员变更 +1 */
+  /** 从 1 起单调递增；每次状态变更（成员变更/群主转让/群改名）+1 */
   epoch: number;
   /** 按 did 排序（签名一致性的规范化序） */
   members: GroupMember[];
@@ -110,13 +111,22 @@ export function createGroup(ikEdPrivateKey: Uint8Array, name: string, ownerDid: 
   return { state, groupSecret: randomBytes(32) };
 }
 
-/** 以新字段重签（成员变更/群名变更的内部原语）。 */
+/** 以新字段重签（成员变更/群主转让/群名变更的内部原语）。 */
 export function signGroup(ikEdPrivateKey: Uint8Array, fields: Omit<GroupState, "signature">): GroupState {
   return { ...fields, signature: ed25519Sign(ikEdPrivateKey, groupStateMessage(fields)) };
 }
 
-/** 验证群状态：owner IK 验签 + 结构校验全部通过才有效。 */
-export function verifyGroupState(state: GroupState): boolean {
+/**
+ * 验证群状态：结构校验 + IK 验签全部通过才有效。
+ *
+ * 常规路径：签名锚定 state.owner（权威即签名者）。
+ * 权威转移路径（可选 prevState）：转让状态的签名仍由原 owner 签发——这是权威
+ * 转移的密码学事实，而 state.owner 已指向新 owner，故单看新状态无法自证
+ * （Ed25519 验签锚点必然是签名者公钥）；持有上一个状态的成员以 prevState 为锚
+ * 验证：同群、epoch 连续 +1、原 owner 已降级为 member、签名出自原 owner IK。
+ * prevState 须为验证方本地已采信的上一个状态（不递归重验，以兼容连续转让链）。
+ */
+export function verifyGroupState(state: GroupState, prevState?: GroupState): boolean {
   if (state.v !== 1) return false;
   if (!Number.isSafeInteger(state.epoch) || state.epoch < 1) return false;
   if (state.name.length === 0 || utf8ToBytes(state.name).length > NAME_MAX_BYTES) return false;
@@ -130,7 +140,22 @@ export function verifyGroupState(state: GroupState): boolean {
   }
   if (state.signature.length !== SIGNATURE_LENGTH) return false;
   const { signature, ...fields } = state;
-  return ed25519Verify(signature, groupStateMessage(fields), didToEd25519PublicKey(state.owner));
+  if (ed25519Verify(signature, groupStateMessage(fields), didToEd25519PublicKey(state.owner))) return true;
+  // 常规验签未过且提供了上一个状态时，尝试权威转移路径
+  if (prevState === undefined || prevState.v !== 1) return false;
+  if (!Number.isSafeInteger(prevState.epoch) || prevState.epoch < 1) return false;
+  if (state.groupId !== prevState.groupId) return false;
+  if (state.epoch !== prevState.epoch + 1) return false;
+  if (state.owner === prevState.owner) return false;
+  // 原 owner 须仍在新清单中且已降级为 member（转让完整性的结构证据）
+  const previous = state.members.find((m) => m.did === prevState.owner);
+  if (!previous || previous.role !== "member") return false;
+  try {
+    didToEd25519PublicKey(prevState.owner);
+  } catch {
+    return false;
+  }
+  return ed25519Verify(signature, groupStateMessage(fields), didToEd25519PublicKey(prevState.owner));
 }
 
 export function isGroupMember(state: GroupState, did: string): boolean {
@@ -156,7 +181,7 @@ export function addGroupMember(ikEdPrivateKey: Uint8Array, state: GroupState, ne
   });
 }
 
-/** 移除成员（FR-6.2 断读）：epoch+1；owner 不可被移除（v1 无转让）。 */
+/** 移除成员（FR-6.2 断读）：epoch+1；owner 不可被移除（转让走 transferGroupOwnership）。 */
 export function removeGroupMember(ikEdPrivateKey: Uint8Array, state: GroupState, targetDid: string): GroupState {
   if (targetDid === state.owner) throw new Error("群主不可被移除");
   if (!isGroupMember(state, targetDid)) throw new Error("该用户不是群成员");
@@ -167,6 +192,46 @@ export function removeGroupMember(ikEdPrivateKey: Uint8Array, state: GroupState,
     epoch: state.epoch + 1,
     members: state.members.filter((m) => m.did !== targetDid),
   });
+}
+
+/**
+ * 群主转让：newOwnerDid 须为现有成员且非当前 owner。旧 owner 降级为 role:"member"，
+ * 新 owner 升为 role:"owner"（双方 joinedEpoch 均保持不变），epoch+1（v1 设计决定：
+ * 任何状态变更都推进 epoch，编排层复用统一的 SK 重分发路径），群成员总数不变。
+ *
+ * 签名仍由调用方 IK（原 owner）签发——这是权威转移的密码学事实：转让授权本身
+ * 必须出自现任权威。因此转让状态的验证锚点是原 owner（借助上一状态，见
+ * verifyGroupState 的权威转移路径）；新 owner 后续签发的状态回到常规 owner 锚点。
+ */
+export function transferGroupOwnership(ikEdPrivateKey: Uint8Array, state: GroupState, newOwnerDid: string): GroupState {
+  if (!isGroupMember(state, newOwnerDid)) throw new Error("该用户不是群成员");
+  if (newOwnerDid === state.owner) throw new Error("不能将群主转让给自己");
+  const { signature, ...fields } = state;
+  void signature;
+  return signGroup(ikEdPrivateKey, {
+    ...fields,
+    owner: newOwnerDid,
+    epoch: state.epoch + 1,
+    members: state.members.map((m) => {
+      if (m.did === newOwnerDid) return { ...m, role: "owner" as const };
+      if (m.did === state.owner) return { ...m, role: "member" as const };
+      return m;
+    }),
+  });
+}
+
+/**
+ * 群改名：群名校验与 createGroup 一致（1-256 UTF-8 字节）；epoch+1（与转让同一
+ * 设计决定：统一"状态变更=epoch 推进"，编排层无需区分处理）；owner 与成员列表
+ * 逐字段不变，签名由调用方 IK（owner）重签，常规 owner 锚点验签即可通过。
+ */
+export function renameGroup(ikEdPrivateKey: Uint8Array, state: GroupState, newName: string): GroupState {
+  if (newName.length === 0 || utf8ToBytes(newName).length > NAME_MAX_BYTES) {
+    throw new Error("群名长度非法（1-256 字节）");
+  }
+  const { signature, ...fields } = state;
+  void signature;
+  return signGroup(ikEdPrivateKey, { ...fields, name: newName, epoch: state.epoch + 1 });
 }
 
 // ----- JSON 编解码（群信箱广播与 1:1 分发统一形态；signature 为 base64） -----

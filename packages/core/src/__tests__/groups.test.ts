@@ -1,6 +1,6 @@
 /**
  * 群组模块单测（M3-S11，FR-6.1/6.2）：
- * 群状态签名/成员变更语义、双层信封加解密、移除断读与防伪造、防重放。
+ * 群状态签名/成员变更语义、群主转让与群改名、双层信封加解密、移除断读与防伪造、防重放。
  */
 import { describe, expect, it } from "vitest";
 
@@ -18,8 +18,10 @@ import {
   makeGroupKeysPayload,
   openGroupMessage,
   removeGroupMember,
+  renameGroup,
   sealGroupMessage,
   signGroup,
+  transferGroupOwnership,
   utf8ToBytes,
   verifyGroupState,
   createIdentity,
@@ -170,5 +172,69 @@ describe("群组加密（Sender-Keys 双层信封）", () => {
     const { state, groupSecret } = setupGroup(2);
     expect(groupMailboxId(groupSecret, state.epoch)).not.toBe(groupMailboxId(groupSecret, state.epoch + 1));
     expect(groupMailboxId(groupSecret, state.epoch)).toBe(groupMailboxId(groupSecret, state.epoch));
+  });
+});
+
+describe("群主转让与群改名（权威转移）", () => {
+  it("转让：新 owner 就任、旧 owner 降级、epoch+1、joinedEpoch 保持、人数不变", () => {
+    const { owner, members, state } = setupGroup(3);
+    const newOwner = members[0]!;
+    const next = transferGroupOwnership(owner.ikEd.privateKey, state, newOwner.did);
+    expect(next.epoch).toBe(state.epoch + 1);
+    expect(next.owner).toBe(newOwner.did);
+    expect(next.members).toHaveLength(state.members.length);
+    const newEntry = next.members.find((m) => m.did === newOwner.did)!;
+    expect(newEntry.role).toBe("owner");
+    expect(newEntry.joinedEpoch).toBe(state.members.find((m) => m.did === newOwner.did)!.joinedEpoch);
+    const oldEntry = next.members.find((m) => m.did === owner.did)!;
+    expect(oldEntry.role).toBe("member");
+    expect(oldEntry.joinedEpoch).toBe(state.members.find((m) => m.did === owner.did)!.joinedEpoch);
+    // 转让签名仍由原 owner IK 签发（权威转移的密码学事实），而 owner 字段已指向
+    // 新 owner：持有上一状态的成员以 prevState 为锚可验证转让；不知情者单看新
+    // 状态无从验证（Ed25519 验签锚点必然是签名者公钥）。
+    expect(verifyGroupState(next, state)).toBe(true);
+    expect(verifyGroupState(next)).toBe(false);
+  });
+
+  it("转让边界：非成员拒绝；对 owner 自己转让拒绝", () => {
+    const { owner, state } = setupGroup(2);
+    expect(() => transferGroupOwnership(owner.ikEd.privateKey, state, "did:mychat:none")).toThrow(/不是群成员/);
+    expect(() => transferGroupOwnership(owner.ikEd.privateKey, state, owner.did)).toThrow(/自己/);
+  });
+
+  it("转让后由新 owner 继续管理：addGroupMember 重签且常规验签通过（转让的实际意义）", () => {
+    const { owner, members, state } = setupGroup(3);
+    const newOwner = members[0]!;
+    const transferred = transferGroupOwnership(owner.ikEd.privateKey, state, newOwner.did);
+    const outsider = createIdentity();
+    const next = addGroupMember(newOwner.ikEd.privateKey, transferred, outsider.did);
+    expect(next.epoch).toBe(transferred.epoch + 1);
+    expect(next.owner).toBe(newOwner.did);
+    expect(next.members.some((m) => m.did === outsider.did && m.joinedEpoch === next.epoch)).toBe(true);
+    // 新 owner 时代的常规状态：owner 即签名者，回到常规锚点验签
+    expect(verifyGroupState(next)).toBe(true);
+  });
+
+  it("改名：epoch+1、成员与 owner 逐字段不变、验签通过；非法群名拒绝", () => {
+    const { owner, state } = setupGroup(2);
+    const next = renameGroup(owner.ikEd.privateKey, state, "改名后的群");
+    expect(next.epoch).toBe(state.epoch + 1);
+    expect(next.name).toBe("改名后的群");
+    expect(next.members).toEqual(state.members);
+    expect(next.owner).toBe(state.owner);
+    expect(next.groupId).toBe(state.groupId);
+    expect(verifyGroupState(next)).toBe(true);
+    expect(() => renameGroup(owner.ikEd.privateKey, state, "")).toThrow(/群名长度非法/);
+    expect(() => renameGroup(owner.ikEd.privateKey, state, "a".repeat(257))).toThrow(/群名长度非法/);
+    // 上限按 UTF-8 字节计：85 个汉字（255 字节）可过，86 个汉字（258 字节）拒
+    expect(renameGroup(owner.ikEd.privateKey, state, "群".repeat(85)).name.length).toBe(85);
+    expect(() => renameGroup(owner.ikEd.privateKey, state, "群".repeat(86))).toThrow(/群名长度非法/);
+  });
+
+  it("确定性：同输入两次转让产出逐字节一致", () => {
+    const { owner, members, state } = setupGroup(2);
+    const a = transferGroupOwnership(owner.ikEd.privateKey, state, members[0]!.did);
+    const b = transferGroupOwnership(owner.ikEd.privateKey, state, members[0]!.did);
+    expect(encodeGroupStateJson(a)).toBe(encodeGroupStateJson(b));
   });
 });

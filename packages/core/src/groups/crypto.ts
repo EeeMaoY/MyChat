@@ -71,9 +71,14 @@ export interface GroupView {
   recvIndex: Map<string, number>;
 }
 
-/** 由群状态、群秘密与当前 epoch 发送密钥集构造接收视角（状态必须验签通过）。 */
-export function createGroupView(state: GroupState, groupSecret: Uint8Array, senderKeys: Map<string, Uint8Array>): GroupView {
-  if (!verifyGroupState(state)) throw new Error("群状态验签失败，拒绝构造群视角");
+/** 由群状态、群秘密与当前 epoch 发送密钥集构造接收视角（状态须验签；权威转让态传 prevState）。 */
+export function createGroupView(
+  state: GroupState,
+  groupSecret: Uint8Array,
+  senderKeys: Map<string, Uint8Array>,
+  prevState?: GroupState,
+): GroupView {
+  if (!verifyGroupState(state, prevState)) throw new Error("群状态验签失败，拒绝构造群视角");
   return { state, groupSecret, senderKeys, sendIndex: 0, recvIndex: new Map() };
 }
 
@@ -206,8 +211,9 @@ export function makeGroupKeysPayload(state: GroupState, groupSecret: Uint8Array,
 /**
  * 消费群密钥载荷：验证群状态签名后构造视角（新成员入群 / 全员 epoch 刷新共用）。
  * 载荷虽经 1:1 DR 会话到达，仍须本地验签（SR-5：分发通道可信 ≠ 内容免验）。
+ * 权威转让态（签名出自原 owner）由调用方传入本地持有的 prevState 验证。
  */
-export function applyGroupKeysPayload(payload: GroupKeysPayload): GroupView {
+export function applyGroupKeysPayload(payload: GroupKeysPayload, prevState?: GroupState): GroupView {
   if (payload.v !== 1) throw new Error("群密钥载荷版本不识别");
   const state = decodeGroupStateJson(JSON.stringify(payload.state));
   if (state.groupId !== payload.groupId || state.epoch !== payload.epoch) {
@@ -217,5 +223,5 @@ export function applyGroupKeysPayload(payload: GroupKeysPayload): GroupView {
   for (const entry of payload.senderKeys) {
     senderKeys.set(entry.did, base58Decode(entry.key));
   }
-  return createGroupView(state, base58Decode(payload.groupSecret), senderKeys);
+  return createGroupView(state, base58Decode(payload.groupSecret), senderKeys, prevState);
 }
