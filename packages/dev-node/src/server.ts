@@ -255,14 +255,22 @@ export function startDevNode(
       socket.destroy();
       return;
     }
-    const mailboxId = url.searchParams.get("mailbox");
-    if (!mailboxId || mailboxId.length > 128) {
+    // 单条 WS 承载多信箱（M4-S15 修复：浏览器同 host 6 连接上限，多会话场景
+    // 每信箱一条 WS 会耗尽连接池导致后续 HTTP 挂起）；mailbox= 单信箱参数保留兼容。
+    const mailboxesParam = url.searchParams.get("mailboxes");
+    const mailboxIds = (mailboxesParam !== null
+      ? mailboxesParam.split(",").filter((m) => m.length > 0 && m.length <= 128)
+      : [url.searchParams.get("mailbox") ?? ""].filter((m) => m.length > 0)
+    ).slice(0, 64);
+    if (mailboxIds.length === 0) {
       socket.destroy();
       return;
     }
     wss.handleUpgrade(req, socket, head, (ws) => {
-      state.relay.subscribe(mailboxId, ws as WebSocket);
-      ws.send(JSON.stringify({ type: "mailbox-activity", mailboxId } satisfies RelayNotification));
+      for (const mailboxId of mailboxIds) {
+        state.relay.subscribe(mailboxId, ws as WebSocket);
+      }
+      ws.send(JSON.stringify({ type: "mailbox-activity", mailboxId: mailboxIds[0] } satisfies RelayNotification));
     });
   });
 

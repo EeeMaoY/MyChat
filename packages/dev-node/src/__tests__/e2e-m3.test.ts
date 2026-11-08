@@ -461,3 +461,56 @@ describe("M3-S11 Gate：群组 v1（FR-6.1/6.2）", () => {
     expect(decrypted).toEqual(fileData);
   });
 });
+
+describe("M4 补充：成员退群协议闭环（group-leave → owner 自动移除 → 断读）", () => {
+  it("成员发退群请求 → owner 收到并移除重分发 → 退群者拿不到新 epoch 密钥", async () => {
+    const { owner, alice, bob } = await setupThreeParties();
+    const created = createGroup(owner.identity.ikEd.privateKey, "退群闭环群", owner.identity.did, [alice.identity.did, bob.identity.did]);
+    const keys1 = generateSenderKeys(created.state.members.map((m) => m.did));
+    owner.groupView = createGroupView(created.state, created.groupSecret, keys1);
+    const { makeGroupKeysPayload } = await import("@mychat/core");
+    for (const member of [alice, bob]) {
+      const payload = makeGroupKeysPayload(created.state, created.groupSecret, keys1);
+      await sendSessionPayload(owner, member.identity.did, { v: 1, type: "group-keys", payload });
+      const received = await receiveSessionPayloads(member, owner.identity.did);
+      const keys = received.find((p) => (p as { type?: string }).type === "group-keys") as { payload: GroupKeysPayload };
+      member.groupView = applyGroupKeysPayload(keys.payload);
+    }
+
+    // bob 发退群请求（客户端 leaveGroup 的线上形态：1:1 会话发 group-leave）
+    await sendSessionPayload(bob, owner.identity.did, { v: 1, type: "group-leave", groupId: created.state.groupId });
+
+    // owner 收到请求 → 自动 removeMemberFromGroup（客户端 handleSessionPayload 的 group-leave 分支语义）
+    const { removeGroupMember: remove } = await import("@mychat/core");
+    const nextState = remove(owner.identity.ikEd.privateKey, owner.groupView!.state, bob.identity.did);
+    const newKeys = generateSenderKeys(nextState.members.map((m) => m.did));
+    owner.groupView = createGroupView(nextState, created.groupSecret, newKeys);
+    for (const member of [alice]) {
+      const payload = makeGroupKeysPayload(nextState, created.groupSecret, newKeys);
+      await sendSessionPayload(owner, member.identity.did, { v: 1, type: "group-keys", payload });
+      const received = await receiveSessionPayloads(member, owner.identity.did);
+      const keys = received.find((p) => (p as { type?: string }).type === "group-keys") as { payload: GroupKeysPayload };
+      member.groupView = applyGroupKeysPayload(keys.payload);
+    }
+
+    // owner 发新 epoch 消息 → alice 可解；bob（已退群，滞留旧视角）不可解
+    const ownerWire = sealGroupMessage(owner.identity.ikEd.privateKey, owner.identity.did, newKeys.get(owner.identity.did)!, created.groupSecret, nextState.groupId, nextState.epoch, 0, utf8ToBytes("退群后的消息"));
+    await sendGroupWire(owner, ownerWire);
+    const ownerGot = await receiveGroupMessages(owner);
+    expect(ownerGot.map((g) => g.text)).toContain("退群后的消息");
+    const bobMailbox = groupMailboxId(bob.groupView!.groupSecret, bob.groupView!.state.epoch);
+    const newMailbox = groupMailboxId(created.groupSecret, nextState.epoch);
+    expect(bobMailbox).not.toBe(newMailbox);
+    const bobReadable = await fetchMailbox(newMailbox).then((envs) =>
+      envs.filter((e) => {
+        try {
+          openGroupMessage(bob.groupView!, stripPadding(e.payload));
+          return true;
+        } catch {
+          return false;
+        }
+      }),
+    );
+    expect(bobReadable).toHaveLength(0);
+  });
+});

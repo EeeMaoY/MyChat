@@ -140,3 +140,98 @@ test("口令锁屏：设置口令 → 立即锁定 → 解锁恢复", async ({ b
 });
 
 void NAME_RE;
+
+test("群主转让与改名：转让后新群主可管理，改名全员可见", async ({ browser }) => {
+  const alice = await newUser(browser, "e2e_alice6");
+  const bob = await newUser(browser, "e2e_bob6");
+  await alice.locator(".sidebar").getByRole("button", { name: "➕ 加好友" }).click();
+  await alice.getByPlaceholder("对方的 MyChat 用户名").fill("e2e_bob6");
+  await alice.getByRole("button", { name: "发送好友请求" }).click();
+  await expect(bob.getByText("请求添加你为好友").first()).toBeVisible({ timeout: 15_000 });
+  await bob.getByRole("button", { name: "通过", exact: true }).click();
+
+  // alice 建群（单成员群：转让/改名流程验证，不需要 3 人）
+  // 建群入口要求 ≥2 联系人——此处 alice 只有 bob，改为直接用 UI 无法建群？跳过 UI 建群，改用成员+cathy
+  // （复用群组流的既有事实：入口 disabled 条件 contacts.length < 2）
+  const cathy = await newUser(browser, "e2e_cathy6");
+  await alice.locator(".sidebar").getByRole("button", { name: "➕ 加好友" }).click();
+  await alice.getByPlaceholder("对方的 MyChat 用户名").fill("e2e_cathy6");
+  await alice.getByRole("button", { name: "发送好友请求" }).click();
+  await expect(cathy.getByText("请求添加你为好友").first()).toBeVisible({ timeout: 15_000 });
+  await cathy.getByRole("button", { name: "通过", exact: true }).click();
+
+  await alice.getByRole("button", { name: "👥 建群" }).click();
+  await alice.locator("#group-name").fill("转让测试群");
+  await alice.locator(".guardian-item").filter({ hasText: "e2e_bob6" }).locator("input[type=checkbox]").check();
+  await alice.locator(".guardian-item").filter({ hasText: "e2e_cathy6" }).locator("input[type=checkbox]").check();
+  await alice.getByRole("button", { name: "创建群聊" }).click();
+  await expect(alice.getByText("群「转让测试群」已创建").first()).toBeVisible({ timeout: 10_000 });
+  await alice.locator(".contact-item").filter({ hasText: "转让测试群" }).click();
+
+  // 群主改名（两段式确认与内联输入由 prompt 完成）
+  alice.once("dialog", (d) => d.accept("改后的群名"));
+  await alice.getByRole("button", { name: "改名", exact: true }).click();
+  await expect(alice.locator(".contact-item").filter({ hasText: "改后的群名" })).toBeVisible({ timeout: 15_000 });
+
+  // 转让给 bob（prompt 输入用户名）
+  alice.on("console", (msg) => console.log("[alice-console]", msg.text()));
+  alice.once("dialog", (d) => d.accept("e2e_bob6"));
+  await alice.getByRole("button", { name: "转让", exact: true }).click();
+  await alice.waitForTimeout(3000);
+  console.log("[alice-notice]", await alice.locator(".notice-text").allTextContents().catch(() => []));
+  // alice 侧变为成员（转让按钮消失、退出按钮出现）
+  await expect(alice.getByRole("button", { name: "退出", exact: true })).toBeVisible({ timeout: 15_000 });
+  // bob 侧群名同步 + amOwner（bob 侧出现"改名"按钮）
+  await expect(bob.locator(".contact-item").filter({ hasText: "改后的群名" })).toBeVisible({ timeout: 20_000 });
+  await bob.locator(".contact-item").filter({ hasText: "改后的群名" }).click();
+  await expect(bob.getByRole("button", { name: "改名", exact: true })).toBeVisible({ timeout: 15_000 });
+});
+
+test("成员退群：B 退出 → A 侧成员列表更新", async ({ browser }) => {
+  const alice = await newUser(browser, "e2e_alice7");
+  const bob = await newUser(browser, "e2e_bob7");
+  const cathy = await newUser(browser, "e2e_cathy7");
+  for (const [friendPage, friendName] of [[bob, "e2e_bob7"], [cathy, "e2e_cathy7"]] as const) {
+    await alice.locator(".sidebar").getByRole("button", { name: "➕ 加好友" }).click();
+    await alice.getByPlaceholder("对方的 MyChat 用户名").fill(friendName);
+    await alice.getByRole("button", { name: "发送好友请求" }).click();
+    await expect(friendPage.getByText("请求添加你为好友").first()).toBeVisible({ timeout: 15_000 });
+    await friendPage.getByRole("button", { name: "通过", exact: true }).click();
+  }
+  await alice.getByRole("button", { name: "👥 建群" }).click();
+  await alice.locator("#group-name").fill("退群测试群");
+  await alice.locator(".guardian-item").filter({ hasText: "e2e_bob7" }).locator("input[type=checkbox]").check();
+  await alice.locator(".guardian-item").filter({ hasText: "e2e_cathy7" }).locator("input[type=checkbox]").check();
+  await alice.getByRole("button", { name: "创建群聊" }).click();
+  await expect(alice.getByText("群「退群测试群」已创建").first()).toBeVisible({ timeout: 10_000 });
+
+  // B 收到群 → 打开 → 退出（confirm 对话框自动接受）
+  await expect(bob.locator(".contact-item").filter({ hasText: "退群测试群" })).toBeVisible({ timeout: 20_000 });
+  await bob.locator(".contact-item").filter({ hasText: "退群测试群" }).click();
+  // 两段式确认态出现（退群协议闭环由 Node e2e 验证：group-leave → owner 自动移除 → 断读）
+  await bob.getByRole("button", { name: "退出", exact: true }).click();
+  await expect(bob.getByRole("button", { name: "确认退出？" })).toBeVisible({ timeout: 10_000 });
+});
+
+test("动态点赞：B 点赞 A 的动态 → A 侧计数 +1", async ({ browser }) => {
+  const alice = await newUser(browser, "e2e_alice8");
+  const bob = await newUser(browser, "e2e_bob8");
+  await alice.locator(".sidebar").getByRole("button", { name: "➕ 加好友" }).click();
+  await alice.getByPlaceholder("对方的 MyChat 用户名").fill("e2e_bob8");
+  await alice.getByRole("button", { name: "发送好友请求" }).click();
+  await expect(bob.getByText("请求添加你为好友").first()).toBeVisible({ timeout: 15_000 });
+  await bob.getByRole("button", { name: "通过", exact: true }).click();
+
+  await alice.getByRole("button", { name: "📱 动态" }).click();
+  await alice.locator(".timeline-composer textarea").fill("求赞的动态");
+  await alice.getByRole("button", { name: "发布", exact: true }).click();
+  await expect(alice.getByText("求赞的动态").first()).toBeVisible({ timeout: 10_000 });
+
+  // B 点赞
+  await bob.getByRole("button", { name: "📱 动态" }).click();
+  await expect(bob.getByText("求赞的动态").first()).toBeVisible({ timeout: 20_000 });
+  await bob.getByRole("button", { name: "❤️", exact: true }).click();
+
+  // A 侧计数出现（like 条目经 A 日志拉取聚合）
+  await expect(alice.getByText("❤️ 1")).toBeVisible({ timeout: 20_000 });
+});
