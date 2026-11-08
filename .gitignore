@@ -8,3 +8,4 @@ coverage/
 # Playwright 产物（M4-S14）
 packages/client-web/test-results/
 packages/client-web/playwright-report/
+.tmp-build/
