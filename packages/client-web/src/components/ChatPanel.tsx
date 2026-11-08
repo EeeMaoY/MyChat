@@ -9,7 +9,7 @@ import {
   type ReactElement,
 } from "react";
 
-import { markChatOpened, sendAttachment, sendMessage, setNotice, useAppState } from "../lib/app";
+import { getGroupSummary, leaveGroup, markChatOpened, openChat, renameGroup, sendAttachment, sendMessage, setNotice, transferGroupOwnership, useAppState } from "../lib/app";
 import type { ChatMessage } from "../lib/messaging";
 
 import { FileBubble, ImageBubble } from "./MessageAttachment";
@@ -66,12 +66,18 @@ export default function ChatPanel({ onBack, onAddFriend }: Props) {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   /** did → 待触发定时器（markChatOpened 500ms 去抖，同一会话合并为一次）。 */
   const openTimersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
+  /** 退群两段式确认（与设备吊销同模式）。 */
+  const [leaveTarget, setLeaveTarget] = useState<string | null>(null);
+  const [leavePending, setLeavePending] = useState(false);
 
   const list = did !== null ? state.messages[did] : undefined;
   const contact = did !== null ? state.contacts.find((c) => c.did === did) : undefined;
   // 群会话（M3-S11）：activeDid = group:<groupId>
   const isGroupChat = did !== null && did.startsWith("group:");
-  const group = isGroupChat && did !== null ? state.groups.find((g) => `group:${g.groupId}` === did) : undefined;
+  // 群聊头直读 messaging 实时摘要（快照可能在状态同步间隙缺群条目）；侧栏等仍用快照
+  const group = isGroupChat && did !== null
+    ? (getGroupSummary(did.slice("group:".length)) ?? state.groups.find((g) => `group:${g.groupId}` === did))
+    : undefined;
 
   function scrollToBottom(): void {
     const el = listRef.current;
@@ -220,9 +226,72 @@ export default function ChatPanel({ onBack, onAddFriend }: Props) {
             {isGroupChat ? `👥 ${group?.name ?? "群聊"}` : (contact?.name ?? shortDid(did ?? ""))}
           </span>
           <span className="chat-peer-did">
-            {isGroupChat ? `${group?.memberCount ?? 0} 位成员 · 端到端群加密` : shortDid(did ?? "")}
+            {isGroupChat
+              ? `${group?.memberCount ?? 0} 位成员 · 端到端群加密`
+              : shortDid(did ?? "")}
           </span>
         </div>
+        {isGroupChat && group !== undefined && (
+          <span className="chat-group-actions">
+            {group.amOwner ? (
+              <>
+                <button
+                  className="btn-ghost"
+                  title="修改群名（会通知全部成员）"
+                  onClick={async () => {
+                    const newName = window.prompt("新群名", group.name);
+                    if (newName === null || newName.trim() === "" || newName.trim() === group.name) return;
+                    const err = await renameGroup(group.groupId, newName.trim());
+                    setNotice(err ?? "群名已更新并通知全部成员");
+                  }}
+                >
+                  改名
+                </button>
+                <button
+                  className="btn-ghost"
+                  title="转让群主给指定成员（输入对方用户名对应的 DID 不可行时提示）"
+                  onClick={async () => {
+                    const member = window.prompt("转让群主给哪位成员？输入其用户名");
+                    if (member === null || member.trim() === "") return;
+                    const target = state.contacts.find((c) => c.name === member.trim());
+                    if (target === undefined) {
+                      setNotice("未找到该用户名的联系人");
+                      return;
+                    }
+                    const err = await transferGroupOwnership(group.groupId, target.did);
+                    setNotice(err ?? `群主已转让给 ${member.trim()}`);
+                  }}
+                >
+                  转让
+                </button>
+              </>
+            ) : (
+              <button
+                className="btn-ghost"
+                title="退出群聊（群主将自动移除你）"
+                disabled={leavePending}
+                onClick={async () => {
+                  // 两段式确认（与设备吊销一致，避免 window.confirm 阻塞异步 handler）
+                  if (leaveTarget !== group.groupId) {
+                    setLeaveTarget(group.groupId);
+                    return;
+                  }
+                  setLeavePending(true);
+                  const err = await leaveGroup(group.groupId);
+                  setLeavePending(false);
+                  setLeaveTarget(null);
+                  if (err !== null) setNotice(err);
+                  else {
+                    setNotice("已退出群聊");
+                    openChat(null);
+                  }
+                }}
+              >
+                {leaveTarget === group.groupId ? (leavePending ? "退出中…" : "确认退出？") : "退出"}
+              </button>
+            )}
+          </span>
+        )}
         <span className="chat-e2ee">🔒 端到端加密</span>
       </header>
 

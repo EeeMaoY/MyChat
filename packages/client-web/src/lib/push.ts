@@ -25,7 +25,11 @@ export async function ensurePushSubscription(api: NodeApi, mailboxes: string[]):
     const applicationServerKey = urlBase64ToUint8Array(publicKey);
     const subscription =
       existing ??
-      (await registration.pushManager.subscribe({ userVisibleOnly: true, applicationServerKey }));
+      (await registration.pushManager.subscribe({
+        userVisibleOnly: true,
+        // BufferSource 需要 ArrayBuffer（lib.dom 的 Uint8Array 泛型收窄，显式取 buffer）
+        applicationServerKey: applicationServerKey.buffer as ArrayBuffer,
+      }));
     const json = subscription.toJSON() as { endpoint?: string; keys?: Record<string, string> };
     if (typeof json.endpoint !== "string") return false;
     await api.putPushSubscription(json as never, mailboxes);
@@ -41,8 +45,8 @@ export async function updatePushMailboxes(api: NodeApi, mailboxes: string[]): Pr
   try {
     if (currentSubscriptionEndpoint === null) return;
     const registration = await navigator.serviceWorker.getRegistration();
-    const subscription = await registration?.pushManager.getSubscription();
-    if (subscription === undefined) return;
+    const subscription = (await registration?.pushManager.getSubscription()) ?? null;
+    if (subscription === null) return;
     const json = subscription.toJSON() as { endpoint?: string };
     if (typeof json.endpoint !== "string") return;
     await api.putPushSubscription(json as never, mailboxes);

@@ -5,7 +5,7 @@
  */
 import { useEffect, useRef, useState, type ChangeEvent } from "react";
 
-import { commentMoment, deleteMoment, publishMoment, setNotice, useAppState } from "../lib/app";
+import { commentMoment, deleteMoment, likeMoment, publishMoment, setNotice, useAppState } from "../lib/app";
 import type { MomentItem } from "../lib/messaging";
 
 import { formatListTime, shortDid } from "./format";
@@ -142,14 +142,30 @@ export default function TimelinePage({ onBack }: { onBack: () => void }) {
                 {m.text !== "" && <p className="moment-text">{m.text}</p>}
                 {m.attachment !== undefined && m.attachment.mime.startsWith("image/") && <ImageBubble attachment={m.attachment} />}
                 <footer className="moment-foot">
-                  <span className="contact-time">{m.comments.length > 0 ? `${m.comments.length} 条留言` : ""}</span>
+                  <span className="contact-time">
+                    {(m.likes?.length ?? 0) > 0 ? `❤️ ${m.likes!.length}` : ""}
+                    {m.comments.length > 0 ? ` · ${m.comments.length} 条留言` : ""}
+                  </span>
                   {m.authorDid !== did && (
-                    <button
-                      className="btn-ghost"
-                      onClick={() => setCommentDraft({ cid: m.cid, text: "" })}
-                    >
-                      留言
-                    </button>
+                    <>
+                      <button
+                        className="btn-ghost"
+                        title="点赞（作者与全部好友可见）"
+                        onClick={async () => {
+                          const err = await likeMoment(m.authorDid, m.cid);
+                          if (err !== null && err !== "已赞过该动态") setNotice(err);
+                          else if (err === "已赞过该动态") setNotice("已赞过该动态");
+                        }}
+                      >
+                        ❤️
+                      </button>
+                      <button
+                        className="btn-ghost"
+                        onClick={() => setCommentDraft({ cid: m.cid, text: "" })}
+                      >
+                        留言
+                      </button>
+                    </>
                   )}
                 </footer>
                 {m.comments.map((c, i) => (

@@ -385,8 +385,39 @@ export async function addGroupMember(groupId: string, memberDid: string): Promis
 }
 
 /** 移除成员（群主，FR-6.2 断读：被移除者不可达新 epoch 的信箱与密钥）。 */
+/** 单群实时摘要（直读 messaging 实例，供群聊头防弹取值）。 */
+export function getGroupSummary(groupId: string): GroupSummary | null {
+  return messaging?.getGroupSummary(groupId) ?? null;
+}
+
 export async function removeGroupMember(groupId: string, memberDid: string): Promise<string | null> {
   return (await messaging?.removeMemberFromGroup(groupId, memberDid)) ?? "应用尚未就绪";
+}
+
+/** 群主转让（M4 后续批次）。 */
+export async function transferGroupOwnership(groupId: string, newOwnerDid: string): Promise<string | null> {
+  return (await messaging?.transferGroupOwnershipTo(groupId, newOwnerDid)) ?? "应用尚未就绪";
+}
+
+/** 群改名（M4 后续批次）。 */
+export async function renameGroup(groupId: string, newName: string): Promise<string | null> {
+  return (await messaging?.renameGroupTo(groupId, newName)) ?? "应用尚未就绪";
+}
+
+/** 成员退群（M4 后续批次）：向群主发请求并本地移除。 */
+export async function leaveGroup(groupId: string): Promise<string | null> {
+  return (await messaging?.leaveGroup(groupId)) ?? "应用尚未就绪";
+}
+
+/** 点赞好友动态（M4 后续批次，幂等由编排层拒绝重复）。 */
+export async function likeMoment(authorDid: string, cid: string): Promise<string | null> {
+  try {
+    if (!messaging) throw new Error("应用尚未就绪");
+    await messaging.likeMoment(authorDid, cid);
+    return null;
+  } catch (err) {
+    return err instanceof Error ? err.message : "点赞失败";
+  }
 }
 
 /** 群消息的实际发送者展示名（无名字时退回短 DID）。 */

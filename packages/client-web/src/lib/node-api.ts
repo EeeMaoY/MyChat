@@ -300,40 +300,50 @@ export class NodeApi {
   // ----- Relay: WS 唤醒订阅 -----
 
   /**
-   * 为每个信箱建立一条 WS 订阅；任一信箱有新内容时触发 onActivity(mailboxId)。
-   * 返回清理函数（关闭全部连接）。断线自动重连（2s 退避）。
+   * 信箱唤醒订阅：**单条 WS 承载全部信箱**（浏览器同 host 连接上限 6，
+   * 每信箱一条 WS 在多会话场景会耗尽连接池导致 HTTP 请求挂起——M4-S15 修复）。
+   * 任一信箱有新内容时触发 onActivity(mailboxId)。返回清理函数；断线自动重连。
    */
   subscribeMailboxes(mailboxIds: string[], onActivity: (mailboxId: string) => void): () => void {
-    const sockets = new Set<WebSocket>();
+    if (mailboxIds.length === 0) return () => {};
+    let ws: WebSocket | null = null;
     let closed = false;
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 
-    for (const mailboxId of mailboxIds) {
-      const connect = () => {
-        if (closed) return;
-        const ws = new WebSocket(
-          `${this.baseUrl.replace(/^http/, "ws")}/v0/relay/subscribe?mailbox=${encodeURIComponent(mailboxId)}`,
-        );
-        sockets.add(ws);
-        ws.onmessage = (event) => {
-          try {
-            const msg = JSON.parse(event.data as string) as { type: string };
-            if (msg.type === "mailbox-activity") onActivity(mailboxId);
-          } catch {
-            /* 忽略畸形帧 */
+    const connect = (): void => {
+      if (closed) return;
+      const query = mailboxIds.map((m) => encodeURIComponent(m)).join(",");
+      const socket = new WebSocket(
+        `${this.baseUrl.replace(/^http/, "ws")}/v0/relay/subscribe?mailboxes=${query}`,
+      );
+      ws = socket;
+      socket.onmessage = (event) => {
+        try {
+          const msg = JSON.parse(event.data as string) as { type: string; mailboxId?: string };
+          if (msg.type === "mailbox-activity" && typeof msg.mailboxId === "string") {
+            onActivity(msg.mailboxId);
           }
-        };
-        ws.onclose = () => {
-          sockets.delete(ws);
-          if (!closed) setTimeout(connect, 2000);
-        };
+        } catch {
+          /* 忽略畸形帧 */
+        }
       };
-      connect();
-    }
+      socket.onclose = () => {
+        ws = null;
+        if (!closed && reconnectTimer === null) {
+          reconnectTimer = setTimeout(() => {
+            reconnectTimer = null;
+            connect();
+          }, 2000);
+        }
+      };
+    };
+    connect();
 
     return () => {
       closed = true;
-      for (const ws of sockets) ws.close();
-      sockets.clear();
+      if (reconnectTimer !== null) clearTimeout(reconnectTimer);
+      ws?.close();
+      ws = null;
     };
   }
 }

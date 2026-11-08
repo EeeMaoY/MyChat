@@ -29,6 +29,8 @@ import {
   createGroup,
   createGroupView,
   createMomentBlock,
+  renameGroup,
+  transferGroupOwnership,
   decodeDeviceCertificateJson,
   decodeGroupStateJson,
   deriveOpkId,
@@ -176,6 +178,8 @@ export interface MomentItem {
   /** 墓碑后本地标记（缓存副本保留但 UI 不渲染内容，FR-4.4 固有边界） */
   deleted?: boolean;
   comments: { fromDid: string; text: string; at: number }[];
+  /** 点赞者 DID 列表（聚合自作者日志的 like 条目，M4 后续批次；旧缓存缺省为空） */
+  likes?: string[];
 }
 
 /** GroupKeysPayload 的客户端持久化 JSON 形态（kv 存储；senderKeys base58）。 */
@@ -205,6 +209,8 @@ type SessionPayload =
   | { v: 1; type: "recovery-share"; did: string; shareX: number; shareY: string }
   /** 群组（FR-6.1，M3-S11）：群密钥分发载荷（经 1:1 DR 会话，被移除者不可达） */
   | { v: 1; type: "group-keys"; payload: GroupKeysPayloadJson }
+  /** 成员退群请求（M4 后续批次）：发送给群主，owner 侧自动执行移除 */
+  | { v: 1; type: "group-leave"; groupId: string }
   /** 动态（FR-4.x，M3-S12）：好友圈密钥分发 / 动态评论（仅作者可见） */
   | { v: 1; type: "circle-keys"; momentKey: string }
   | { v: 1; type: "moment-comment"; cid: string; text: string };
@@ -738,6 +744,20 @@ export class Messaging {
     }));
   }
 
+  /** 单群实时摘要（群聊头直读，绕过快照异步间隙——M4-S15 e2e 定位的渲染时序缺陷）。 */
+  getGroupSummary(groupId: string): GroupSummary | null {
+    const v = this.groups.get(groupId);
+    if (v === undefined) return null;
+    return {
+      groupId: v.state.groupId,
+      name: v.state.name,
+      owner: v.state.owner,
+      epoch: v.state.epoch,
+      memberCount: v.state.members.length,
+      amOwner: v.state.owner === this.identity.did,
+    };
+  }
+
   /**
    * 建群并分发密钥：生成群状态（IK 签名）与 epoch-1 发送密钥集，
    * GroupKeysPayload 经各成员 1:1 DR 会话投递（节点只见群信箱伪地址与密文）。
@@ -787,10 +807,11 @@ export class Messaging {
 
   /** 消费 1:1 会话收到的群密钥载荷：验签、落库、订阅群信箱。 */
   private async handleGroupKeys(payload: GroupKeysPayload): Promise<void> {
-    const view = applyGroupKeysPayload(payload);
+    // 转让态（签名出自原 owner）以本地既有视角为 prevState 验证；新成员无既有视角
+    const existed = this.groups.get(payload.groupId);
+    const view = applyGroupKeysPayload(payload, existed?.state);
     // 仅接受自己确为成员的群（防陌生人推送伪造群配置）
     if (!view.state.members.some((m) => m.did === this.identity.did)) return;
-    const existed = this.groups.get(view.state.groupId);
     // epoch 必须前进（重放旧载荷无意义；载荷内状态已验签）
     if (existed && view.state.epoch <= existed.state.epoch) return;
     this.groups.set(view.state.groupId, view);
@@ -882,6 +903,46 @@ export class Messaging {
     return await this.rotateGroup(groupId, (ik, state) => removeGroupMember(ik, state, memberDid));
   }
 
+  /** 群主转让（M4 后续批次）：epoch+1 → 全员重分发；新 owner 后续管理以新状态为锚。 */
+  async transferGroupOwnershipTo(groupId: string, newOwnerDid: string): Promise<string | null> {
+    return await this.rotateGroup(groupId, (ik, state) => transferGroupOwnership(ik, state, newOwnerDid));
+  }
+
+  /** 群改名（M4 后续批次）：epoch+1 → 全员重分发（统一"状态变更=epoch 推进"）。 */
+  async renameGroupTo(groupId: string, newName: string): Promise<string | null> {
+    return await this.rotateGroup(groupId, (ik, state) => renameGroup(ik, state, newName));
+  }
+
+  /**
+   * 成员主动退群（M4 后续批次，FR-6.4 成员权利）：向群主发退群请求（1:1 会话，
+   * 携带 groupId）→ 群主自动移除该成员并重分发。本地同步移除群视角（立即断读）。
+   */
+  async leaveGroup(groupId: string): Promise<string | null> {
+    try {
+      const view = this.groups.get(groupId);
+      if (view === undefined) return "群不存在";
+      const ownerDid = view.state.owner;
+      const session = this.sessions.get(ownerDid);
+      if (session === undefined) return "与群主的会话不存在，无法退群（请让群主移除你）";
+      if (ownerDid === this.identity.did) return "群主不可退群（可先转让群主再退出）";
+      const wire = sessionSend(
+        session,
+        utf8ToBytes(JSON.stringify({ v: 1, type: "group-leave", groupId } satisfies SessionPayload)),
+      );
+      const mailboxId = sessionMailbox(session, "send", Date.now());
+      await this.deps.api.mailboxAppend(mailboxId, this.seal(wire, mailboxId));
+      // 本地立即移除（新 epoch 的信箱与密钥本来也拿不到）
+      this.groups.delete(groupId);
+      await this.deps.kv.delete(`groupview:${groupId}`);
+      await this.deps.kv.delete(cursorKey(groupMailboxId(view.groupSecret, view.state.epoch)));
+      this.restartRealtime();
+      this.emit();
+      return null;
+    } catch (err) {
+      return err instanceof Error ? err.message : "退群失败";
+    }
+  }
+
   /** 成员变更统一路径：重签状态 → 重生成 SK → 分发幸存成员 → 刷新本地视角。 */
   private async rotateGroup(
     groupId: string,
@@ -892,9 +953,13 @@ export class Messaging {
       if (!view) return "群不存在";
       if (view.state.owner !== this.identity.did) return "仅群主可管理成员";
       const nextState = mutate(this.identity.ikEd.privateKey, view.state);
-      if (!verifyGroupState(nextState)) return "群状态重签失败";
+      // 常规变更单参验签；群主转让的签名出自原 owner（权威转移语义）走 prevState 路径
+      if (!verifyGroupState(nextState) && !verifyGroupState(nextState, view.state)) {
+        return "群状态重签失败";
+      }
       const newKeys = generateSenderKeys(nextState.members.map((m) => m.did));
-      this.groups.set(groupId, createGroupView(nextState, view.groupSecret, newKeys));
+      // 转让态签名出自原 owner：传 prevState 走权威转移验签路径
+      this.groups.set(groupId, createGroupView(nextState, view.groupSecret, newKeys, view.state));
       await this.persistGroupView(groupId);
       for (const member of nextState.members) {
         if (member.did === this.identity.did) continue;
@@ -1057,6 +1122,36 @@ export class Messaging {
     this.emit();
   }
 
+  /**
+   * 点赞好友动态（M4 后续批次，FR-4.3 完整化）：向**作者日志**追加 like 条目
+   * （点赞者 IK 签名，加固②作者性语义天然适用）——作者与全部好友可见聚合。
+   * 幂等保护：已赞过则拒绝（UI 层防重入）。
+   */
+  async likeMoment(authorDid: string, cid: string): Promise<void> {
+    // 点赞 append 到**作者的日志**（互动事件发布到可见性集合，设计报告 §7.3）：
+    // 点赞者持有作者圈密钥（circle-keys 分发），寻址与加密都用作者 key
+    const keyRaw = await this.deps.kv.get(`momentkey:${authorDid}`);
+    if (keyRaw === undefined) throw new Error("未持有作者的好友圈密钥（等待同步）");
+    const kvKey = `moment:${authorDid}:${cid}`;
+    const raw = await this.deps.kv.get(kvKey);
+    if (raw !== undefined) {
+      const item = JSON.parse(bytesToUtf8(raw)) as MomentItem;
+      if ((item.likes ?? []).includes(this.identity.did)) throw new Error("已赞过该动态");
+    }
+    const authorKey = base58Decode(bytesToUtf8(keyRaw));
+    const feedId = momentFeedId(authorKey);
+    const entry = makeMomentEntry(this.identity.ikEd.privateKey, {
+      v: 1,
+      type: "like",
+      cid: "",
+      authorDid: this.identity.did,
+      targetCid: cid,
+      at: Date.now(),
+    });
+    await this.deps.api.mailboxAppend(feedId, this.seal(sealFeedEntry(authorKey, entry), feedId));
+    this.emit();
+  }
+
   /** 时间线（本地聚合：我的 + 持有其好友圈密钥的联系人的动态，按时间倒序）。 */
   async listTimeline(): Promise<MomentItem[]> {
     const out: MomentItem[] = [];
@@ -1072,8 +1167,35 @@ export class Messaging {
     return out.sort((a, b) => b.at - a.at);
   }
 
-  /** 拉取全部好友的动态日志（时间线增量；post 取块解密，delete 应用墓碑）。 */
+  /** 拉取全部好友的动态日志 + 自己的日志（作者聚合点赞，M4 后续批次）。 */
   private async pollMomentFeeds(): Promise<void> {
+    // 自己的日志：仅聚合 like 条目（post/delete 本地已有权威缓存）
+    if (this.myMomentKey !== null) {
+      const myKey = base58Decode(this.myMomentKey);
+      const myFeedId = momentFeedId(myKey);
+      const myCursor = await this.cursorFor(myFeedId);
+      const myResult = await this.deps.api.mailboxFetch(myFeedId, myCursor);
+      for (const envelope of myResult.envelopes) {
+        try {
+          const entry = openFeedEntry(myKey, stripPadding(envelope.payload));
+          if (entry.type !== "like" || entry.targetCid === undefined) continue;
+          const likedKey = `moment:${this.identity.did}:${entry.targetCid}`;
+          const likedRaw = await this.deps.kv.get(likedKey);
+          if (likedRaw !== undefined) {
+            const item = JSON.parse(bytesToUtf8(likedRaw)) as MomentItem;
+            item.likes = item.likes ?? [];
+            if (!item.likes.includes(entry.authorDid)) {
+              item.likes.push(entry.authorDid);
+              await this.deps.kv.put(likedKey, utf8ToBytes(JSON.stringify(item)));
+              this.emit();
+            }
+          }
+        } catch {
+          /* 伪造/篡改：安全丢弃 */
+        }
+      }
+      await this.advanceCursor(myFeedId, myResult.cursor, myResult.envelopes.length > 0);
+    }
     for (const did of this.contacts.keys()) {
       const keyRaw = await this.deps.kv.get(`momentkey:${did}`);
       if (keyRaw === undefined) continue;
@@ -1084,7 +1206,23 @@ export class Messaging {
       for (const envelope of envelopes) {
         try {
           const entry = openFeedEntry(theirKey, stripPadding(envelope.payload));
-          // 双重作者性断言：签名者即条目作者（open 内验签），且条目属于该日志的作者
+          // 点赞条目：作者即点赞者（非日志主人，IK 验签已保证作者性），聚合到被赞动态
+          if (entry.type === "like") {
+            if (entry.targetCid === undefined) continue;
+            const likedKey = `moment:${did}:${entry.targetCid}`;
+            const likedRaw = await this.deps.kv.get(likedKey);
+            if (likedRaw !== undefined) {
+              const item = JSON.parse(bytesToUtf8(likedRaw)) as MomentItem;
+              item.likes = item.likes ?? [];
+              if (!item.likes.includes(entry.authorDid)) {
+                item.likes.push(entry.authorDid);
+                await this.deps.kv.put(likedKey, utf8ToBytes(JSON.stringify(item)));
+                this.emit();
+              }
+            }
+            continue;
+          }
+          // post/delete：日志主人的条目，双重断言（签名者=声明作者=日志主人）
           if (entry.authorDid !== did) continue;
           const kvKey = `moment:${did}:${entry.cid}`;
           if (entry.type === "delete") {
@@ -1797,6 +1935,13 @@ export class Messaging {
     if (payload.type === "group-keys") {
       // 群密钥分发（经 1:1 DR 会话）：验签后入群/刷新 epoch（M3-S11）
       await this.handleGroupKeys(payload.payload);
+      return null;
+    }
+    if (payload.type === "group-leave") {
+      // 成员退群请求（M4 后续批次）：退群是成员权利，群主自动执行移除并重分发
+      if (typeof payload.groupId === "string" && this.groups.get(payload.groupId)?.state.owner === this.identity.did) {
+        await this.removeMemberFromGroup(payload.groupId, did);
+      }
       return null;
     }
     if (payload.type === "circle-keys") {
