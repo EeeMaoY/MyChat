@@ -57,6 +57,10 @@ export const DEFAULT_LIMITS = {
   maxMailboxes: 5000,
   /** WS 并发连接数上限（半开连接/订阅表膨胀护栏） */
   maxWsConnections: 64,
+  /** Push 订阅表总量上限 */
+  maxPushSubscriptions: 10_000,
+  /** 每分钟 push 订阅登记上限（节点全局） */
+  pushSubscribePerMin: 60,
 } as const;
 
 export type Limits = { -readonly [K in keyof typeof DEFAULT_LIMITS]: number };

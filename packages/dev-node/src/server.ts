@@ -54,7 +54,7 @@ import {
 } from "./storage.ts";
 import { closePersistence, createPersistence, type Persistence, type PersistRecord } from "./persistence.ts";
 import { DEFAULT_LIMITS, RateLimiter, type Limits } from "./limits.ts";
-import { createPushStore, notifyMailbox, putSubscription, removeSubscription, type PushStore } from "./push.ts";
+import { createPushStore, isValidPushEndpoint, isValidPushKeys, notifyMailbox, putSubscription, removeSubscription, type PushStore } from "./push.ts";
 
 const MAX_BODY = 16 * 1024 * 1024; // 块大小上限 16MB
 const MAILBOX_MAX_ENTRIES = 1000;
@@ -84,6 +84,7 @@ interface NodeState {
     register: RateLimiter;
     ktAppend: RateLimiter;
     devicePut: RateLimiter;
+    pushSubscribe: RateLimiter;
   };
 }
 
@@ -271,6 +272,7 @@ export function startDevNode(
       register: new RateLimiter(limits.registerPerMin, 60_000),
       ktAppend: new RateLimiter(limits.ktAppendPerMin, 60_000),
       devicePut: new RateLimiter(limits.devicePutPerMin, 60_000),
+      pushSubscribe: new RateLimiter(limits.pushSubscribePerMin, 60_000),
     },
   };
   replayPersisted(state, state.persistence.load());
@@ -746,6 +748,10 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
     }
     if (parts[1] === "push" && parts[2] === "subscribe") {
       if (req.method === "PUT") {
+        // 限流：登记全局窗口（攻击者轮换 endpoint 时按键限流无效）
+        if (!state.limiters.pushSubscribe.allow("global")) {
+          return sendError(res, 429, "订阅请求过于频繁（节点限流）");
+        }
         const body = await readJson(req);
         const subscription = body.subscription as { endpoint?: string; keys?: unknown } | undefined;
         if (
@@ -755,6 +761,17 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
           typeof subscription.keys !== "object"
         ) {
           return sendError(res, 400, "订阅结构非法");
+        }
+        // SSRF 面：仅 https（本机回环 http 放行），防订阅端点把节点引向内网
+        if (!isValidPushEndpoint(subscription.endpoint)) {
+          return sendError(res, 400, "订阅 endpoint 非法（仅允许 https 或本机 http）");
+        }
+        if (!isValidPushKeys(subscription.keys)) {
+          return sendError(res, 400, "订阅 keys 非法（p256dh/auth 须为非空字符串且 ≤512）");
+        }
+        // 订阅表总量上限：仅约束新端点（更新既有订阅不受限）
+        if (!state.push.subscriptions.has(subscription.endpoint) && state.push.subscriptions.size >= state.limits.maxPushSubscriptions) {
+          return sendError(res, 429, "订阅数已达上限（maxPushSubscriptions）");
         }
         const mailboxes = Array.isArray(body.mailboxes)
           ? body.mailboxes.filter((m): m is string => typeof m === "string" && m.length <= 128).slice(0, 256)

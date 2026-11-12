@@ -61,6 +61,36 @@ export function createPushStore(persistDir: string | undefined): PushStore {
   return { subscriptions: new Map(), vapid: loadOrCreateVapid(persistDir) };
 }
 
+/**
+ * 订阅端点校验（SSRF 面）：必须 https；http 仅放行本机回环 host
+ * （开发/本地推送服务联调用），防订阅把节点变成向内网发请求的跳板。
+ */
+export function isValidPushEndpoint(endpoint: string): boolean {
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return false;
+  }
+  if (url.protocol === "https:") return true;
+  if (url.protocol === "http:") {
+    // URL 解析器对 IPv6 host 保留方括号（[::1]）
+    return url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]" || url.hostname === "::1";
+  }
+  return false;
+}
+
+/** 订阅 keys 校验：p256dh/auth 为非空字符串且 ≤512（仅结构合法性，内容节点不可解）。 */
+export function isValidPushKeys(keys: unknown): boolean {
+  if (typeof keys !== "object" || keys === null) return false;
+  const k = keys as Record<string, unknown>;
+  return isPushKeyString(k.p256dh) && isPushKeyString(k.auth);
+}
+
+function isPushKeyString(v: unknown): boolean {
+  return typeof v === "string" && v.length > 0 && v.length <= 512;
+}
+
 export interface PushResult {
   ok: boolean;
   removed: boolean;

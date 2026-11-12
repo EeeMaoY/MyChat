@@ -130,3 +130,55 @@ describe("Web Push 网关（M4-S15）", () => {
     expect(JSON.parse(readFileSync(join(dataDir, "vapid.json"), "utf8"))).toHaveProperty("privateKey");
   });
 });
+
+describe("Push 订阅加固", () => {
+  /** 原始订阅 PUT（不断言 201），返回响应供状态码断言。 */
+  function sub(base: string, subscription: unknown): Promise<Response> {
+    return fetch(`${base}/v0/push/subscribe`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ subscription, mailboxes: ["hard-mailbox"] }),
+    });
+  }
+
+  it("endpoint scheme 校验：内网 http 拒绝；https/本机 http 放行", async () => {
+    node = await startDevNode({});
+    base = `http://127.0.0.1:${node.port}`;
+    const keys = { p256dh: "BPK", auth: "AUTH" };
+    expect((await sub(base, { endpoint: "http://192.168.1.10/send", keys })).status).toBe(400); // 内网
+    expect((await sub(base, { endpoint: "http://10.0.0.5/send", keys })).status).toBe(400);
+    expect((await sub(base, { endpoint: "ftp://push.example.com/send", keys })).status).toBe(400); // 非 http(s)
+    expect((await sub(base, { endpoint: "https://push.example.com/send/abc", keys })).status).toBe(201);
+    expect((await sub(base, { endpoint: "http://127.0.0.1:9099/send", keys })).status).toBe(201); // 本机放行
+    expect((await sub(base, { endpoint: "http://localhost:9099/send", keys })).status).toBe(201);
+  });
+
+  it("keys 校验：空值/超长拒绝", async () => {
+    node = await startDevNode({});
+    base = `http://127.0.0.1:${node.port}`;
+    const endpoint = "https://push.example.com/send/keys-test";
+    expect((await sub(base, { endpoint, keys: { p256dh: "", auth: "AUTH" } })).status).toBe(400);
+    expect((await sub(base, { endpoint, keys: { p256dh: "BPK", auth: "" } })).status).toBe(400);
+    expect((await sub(base, { endpoint, keys: { p256dh: "BPK", auth: "x".repeat(513) } })).status).toBe(400);
+    expect((await sub(base, { endpoint, keys: { p256dh: "x".repeat(512), auth: "AUTH" } })).status).toBe(201); // 边界内放行
+  });
+
+  it("订阅表上限：新端点触顶 429；既有端点更新放行", async () => {
+    node = await startDevNode({ limits: { maxPushSubscriptions: 2 } });
+    base = `http://127.0.0.1:${node.port}`;
+    const keys = { p256dh: "BPK", auth: "AUTH" };
+    const ep = (n: number) => `https://push.example.com/send/cap-${n}`;
+    expect((await sub(base, { endpoint: ep(1), keys })).status).toBe(201);
+    expect((await sub(base, { endpoint: ep(2), keys })).status).toBe(201);
+    expect((await sub(base, { endpoint: ep(3), keys })).status).toBe(429); // 新端点触顶
+    expect((await sub(base, { endpoint: ep(1), keys })).status).toBe(201); // 既有端点更新不受限
+  });
+
+  it("订阅限流：pushSubscribePerMin 触顶 429", async () => {
+    node = await startDevNode({ limits: { pushSubscribePerMin: 1 } });
+    base = `http://127.0.0.1:${node.port}`;
+    const keys = { p256dh: "BPK", auth: "AUTH" };
+    expect((await sub(base, { endpoint: "https://push.example.com/send/rl-1", keys })).status).toBe(201);
+    expect((await sub(base, { endpoint: "https://push.example.com/send/rl-2", keys })).status).toBe(429);
+  });
+});
