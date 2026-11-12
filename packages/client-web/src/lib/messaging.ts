@@ -849,11 +849,32 @@ export class Messaging {
     await this.deps.api.mailboxAppend(mailboxId, this.seal(wire, mailboxId));
   }
 
-  /** 消费 1:1 会话收到的群密钥载荷：验签、落库、订阅群信箱。 */
-  private async handleGroupKeys(payload: GroupKeysPayload): Promise<void> {
+  /**
+   * 消费 1:1 会话收到的群密钥载荷：验签、校验分发者、落库、订阅群信箱。
+   * @param senderDid 会话对端 DID（会话建立即密码学认证）——该载荷的实际分发者
+   */
+  private async handleGroupKeys(payload: GroupKeysPayload, senderDid: string): Promise<void> {
+    // 基本形状校验（对端载荷不可信；群状态的深层校验由 core 验签承担）
+    if (
+      typeof payload !== "object" ||
+      payload === null ||
+      payload.v !== 1 ||
+      typeof payload.groupId !== "string" ||
+      typeof payload.epoch !== "number" ||
+      typeof payload.groupSecret !== "string" ||
+      typeof payload.state !== "object" ||
+      payload.state === null ||
+      !Array.isArray(payload.senderKeys)
+    ) {
+      return;
+    }
     // 转让态（签名出自原 owner）以本地既有视角为 prevState 验证；新成员无既有视角
     const existed = this.groups.get(payload.groupId);
     const view = applyGroupKeysPayload(payload, existed?.state);
+    // 分发者身份校验：GroupState 签名只覆盖群状态，不覆盖 groupSecret/senderKeys——群内恶意成员
+    // 可拿真实签名状态配自选密钥材料抢先推送，替换受害者视角。故只接受群主分发的载荷：
+    // 新状态的 owner，或本地既有视角的 owner（转让态签名出自原 owner、也由原 owner 分发），两个锚点都合法。
+    if (senderDid !== view.state.owner && senderDid !== existed?.state.owner) return;
     // 仅接受自己确为成员的群（防陌生人推送伪造群配置）
     if (!view.state.members.some((m) => m.did === this.identity.did)) return;
     // epoch 必须前进（重放旧载荷无意义；载荷内状态已验签）
@@ -2057,8 +2078,8 @@ export class Messaging {
       return null;
     }
     if (payload.type === "group-keys") {
-      // 群密钥分发（经 1:1 DR 会话）：验签后入群/刷新 epoch（M3-S11）
-      await this.handleGroupKeys(payload.payload);
+      // 群密钥分发（经 1:1 DR 会话）：验签并校验分发者为群主后入群/刷新 epoch（M3-S11）
+      await this.handleGroupKeys(payload.payload, did);
       return null;
     }
     if (payload.type === "group-leave") {

@@ -3,6 +3,7 @@
  */
 export {
   MAX_SKIP,
+  MAX_SKIPPED_TOTAL,
   type DrHeader,
   type RatchetState,
   decodeHeader,
