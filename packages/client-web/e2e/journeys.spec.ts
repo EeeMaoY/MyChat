@@ -347,3 +347,64 @@ test("引用回复：B 引用 A 的消息回复 → 双方气泡显示引用块"
   await expect(alice.getByText("这是引用回复").first()).toBeVisible({ timeout: 20_000 });
   await expect(alice.locator(".quote-block").filter({ hasText: "原始问题消息" })).toBeVisible({ timeout: 10_000 });
 });
+
+test("群撤回与自回声：A 发群消息仅显示一次 → 撤回 → B 视角占位且原文消失", async ({ browser }) => {
+  const alice = await newUser(browser, "e2e_aliceD");
+  const bob = await newUser(browser, "e2e_bobD");
+  const cathy = await newUser(browser, "e2e_cathyD");
+  for (const [friendPage, friendName] of [[bob, "e2e_bobD"], [cathy, "e2e_cathyD"]] as const) {
+    await alice.locator(".sidebar").getByRole("button", { name: "➕ 加好友" }).click();
+    await alice.getByPlaceholder("对方的 MyChat 用户名").fill(friendName);
+    await alice.getByRole("button", { name: "发送好友请求" }).click();
+    await expect(friendPage.getByText("请求添加你为好友").first()).toBeVisible({ timeout: 15_000 });
+    await friendPage.getByRole("button", { name: "通过", exact: true }).click();
+  }
+  await alice.getByRole("button", { name: "👥 建群" }).click();
+  await alice.locator("#group-name").fill("撤回测试群");
+  await alice.locator(".guardian-item").filter({ hasText: "e2e_bobD" }).locator("input[type=checkbox]").check();
+  await alice.locator(".guardian-item").filter({ hasText: "e2e_cathyD" }).locator("input[type=checkbox]").check();
+  await alice.getByRole("button", { name: "创建群聊" }).click();
+  await expect(alice.getByText("群「撤回测试群」已创建").first()).toBeVisible({ timeout: 10_000 });
+  await alice.locator(".contact-item").filter({ hasText: "撤回测试群" }).click();
+  await alice.locator("textarea.chat-textarea").fill("将被撤回的群消息");
+  await alice.getByRole("button", { name: "发送", exact: true }).click();
+
+  // B 收到群（group-keys 分发 + 轮询）并打开群聊可见消息
+  await expect(bob.locator(".contact-item").filter({ hasText: "撤回测试群" })).toBeVisible({ timeout: 20_000 });
+  await bob.locator(".contact-item").filter({ hasText: "撤回测试群" }).click();
+  await expect(bob.getByText("将被撤回的群消息").first()).toBeVisible({ timeout: 15_000 });
+
+  // 自回声：等过一个轮询周期后，发送者与接收者视角该消息各只有一条（修复前发送者视角双份）
+  await alice.waitForTimeout(4500);
+  await expect(alice.locator(".msg-row").filter({ hasText: "将被撤回的群消息" })).toHaveCount(1);
+  await expect(bob.locator(".msg-row").filter({ hasText: "将被撤回的群消息" })).toHaveCount(1);
+
+  // A 撤回（修复前群撤回必报"会话不存在"）：本地占位 + 群 recall 声明
+  await alice.getByRole("button", { name: "撤回", exact: true }).click();
+  await expect(alice.getByText("此消息已撤回").first()).toBeVisible({ timeout: 15_000 });
+  // B 侧按 remoteId 匹配同步占位，原文消失
+  await expect(bob.getByText("此消息已撤回").first()).toBeVisible({ timeout: 20_000 });
+  await expect(bob.getByText("将被撤回的群消息")).toHaveCount(0, { timeout: 10_000 });
+  await expect(alice.getByText("将被撤回的群消息")).toHaveCount(0, { timeout: 10_000 });
+});
+
+test("回执旅程：A 发消息 → B 打开会话 → A 侧该消息出现已读勾", async ({ browser }) => {
+  const alice = await newUser(browser, "e2e_aliceE");
+  const bob = await newUser(browser, "e2e_bobE");
+  await alice.locator(".sidebar").getByRole("button", { name: "➕ 加好友" }).click();
+  await alice.getByPlaceholder("对方的 MyChat 用户名").fill("e2e_bobE");
+  await alice.getByRole("button", { name: "发送好友请求" }).click();
+  await expect(bob.getByText("请求添加你为好友").first()).toBeVisible({ timeout: 15_000 });
+  await bob.getByRole("button", { name: "通过", exact: true }).click();
+  await expect(bob.locator(".chat-peer-name")).toContainText("e2e_aliceE", { timeout: 10_000 });
+
+  // A 发消息（B 已停留在该会话，消息到达即触发去抖的已读上报）
+  await alice.locator("textarea.chat-textarea").fill("回执勾测试消息");
+  await alice.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(bob.getByText("回执勾测试消息").first()).toBeVisible({ timeout: 15_000 });
+
+  // A 侧该 out 消息的回执勾升级为已读（修复前回执 id 空间错配，勾永不出现；
+  // 时限覆盖 B 的去抖 500ms + 双方 3s 轮询）
+  const outRow = alice.locator(".msg-row.msg-out").filter({ hasText: "回执勾测试消息" });
+  await expect(outRow.locator('[aria-label="已读"]')).toBeVisible({ timeout: 25_000 });
+});
