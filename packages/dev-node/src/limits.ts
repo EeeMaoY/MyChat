@@ -51,6 +51,10 @@ export const DEFAULT_LIMITS = {
   devicePutPerMin: 60,
   /** 单 DID 设备数上限（防凭证表被单 DID 无限膨胀） */
   maxDevicesPerDid: 32,
+  /** 块字节总量上限（512MB；条数上限之外的内存/磁盘护栏） */
+  maxBlocksTotalBytes: 536_870_912,
+  /** 信箱总数上限（防轮换随机 mailboxId 绕过按箱限刷） */
+  maxMailboxes: 5000,
 } as const;
 
 export type Limits = { -readonly [K in keyof typeof DEFAULT_LIMITS]: number };

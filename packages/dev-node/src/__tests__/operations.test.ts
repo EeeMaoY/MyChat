@@ -93,6 +93,61 @@ describe("限流与资源配额（M4-S13）", () => {
     });
     expect(third.status).toBe(429);
   });
+
+  it("块字节总量配额：超 maxBlocksTotalBytes 后 PUT 429；删除释放额度", async () => {
+    node = await startDevNode({ limits: { maxBlocksTotalBytes: 1000 } });
+    base = `http://127.0.0.1:${node.port}`;
+    const put = (cid: string, bytes: number) =>
+      fetch(`${base}/v0/storage/blocks/${encodeURIComponent(cid)}`, { method: "PUT", body: Buffer.alloc(bytes, 1) });
+    expect((await put("bq-1", 800)).status).toBe(201);
+    expect((await put("bq-2", 800)).status).toBe(429); // 800+800 > 1000
+    // 删除释放字节额度后可再写入
+    const del = (await (await fetch(`${base}/v0/storage/blocks/${encodeURIComponent("bq-1")}`, { method: "DELETE" })).json()) as { deleted: boolean };
+    expect(del.deleted).toBe(true);
+    expect((await put("bq-2", 800)).status).toBe(201);
+  });
+
+  it("信箱数上限：新信箱创建 429，既有信箱追加不受限", async () => {
+    node = await startDevNode({ limits: { maxMailboxes: 2, mailboxAppendPerMin: 1000 } });
+    base = `http://127.0.0.1:${node.port}`;
+    const append = (mailboxId: string) =>
+      fetch(`${base}/v0/storage/mailboxes/${encodeURIComponent(mailboxId)}/append`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ envelope: envelopeToJson(makeEnvelopeLocal(mailboxId)) }),
+      });
+    expect((await append("mb-1")).status).toBe(201);
+    expect((await append("mb-2")).status).toBe(201);
+    expect((await append("mb-3")).status).toBe(429); // 新信箱触顶
+    expect((await append("mb-1")).status).toBe(201); // 既有信箱照常
+  });
+
+  it("信箱 fetch 分页：单次上限 500 条，cursor 指向下一条位置", async () => {
+    node = await startDevNode({ limits: { mailboxAppendPerMin: 100_000 } });
+    base = `http://127.0.0.1:${node.port}`;
+    const mailboxId = "page-mailbox";
+    const envelope = envelopeToJson(makeEnvelopeLocal(mailboxId));
+    for (let i = 0; i < 505; i++) {
+      const res = await fetch(`${base}/v0/storage/mailboxes/${encodeURIComponent(mailboxId)}/append`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ envelope }),
+      });
+      expect(res.status).toBe(201);
+    }
+    const page1 = (await (await fetch(`${base}/v0/storage/mailboxes/${encodeURIComponent(mailboxId)}`)).json()) as {
+      envelopes: unknown[];
+      cursor: number;
+    };
+    expect(page1.envelopes).toHaveLength(500);
+    expect(page1.cursor).toBe(500); // 下一条位置
+    const page2 = (await (await fetch(`${base}/v0/storage/mailboxes/${encodeURIComponent(mailboxId)}?cursor=${page1.cursor}`)).json()) as {
+      envelopes: unknown[];
+      cursor: number;
+    };
+    expect(page2.envelopes).toHaveLength(5);
+    expect(page2.cursor).toBe(505); // 取尽 → 箱尾 nextCursor
+  });
 });
 
 describe("持久化快照与轮转（M4-S13）", () => {

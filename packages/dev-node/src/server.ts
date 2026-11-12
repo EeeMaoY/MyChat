@@ -650,6 +650,10 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
         if (state.storage.blocks.size >= state.limits.maxBlocks) {
           return sendError(res, 429, "节点存储配额已满（maxBlocks）");
         }
+        // 字节总量配额（条数之外的内存/磁盘护栏）
+        if (state.storage.blocksTotalBytes + body.length > state.limits.maxBlocksTotalBytes) {
+          return sendError(res, 429, "节点存储字节配额已满（maxBlocksTotalBytes）");
+        }
         putBlock(state.storage, cid, new Uint8Array(body));
         state.persistence.append({ t: "block", cid, bytes: Buffer.from(new Uint8Array(body)).toString("base64") });
         return sendJson(res, 201, { ok: true });
@@ -689,6 +693,10 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
         const box = state.storage.mailboxes.get(mailboxId);
         if (box && box.entries.length >= MAILBOX_MAX_ENTRIES) {
           return sendError(res, 429, "信箱已满（开发节点配额）");
+        }
+        // 信箱总数上限：新信箱创建前检查（防轮换随机 mailboxId 绕过按箱限流刷表）
+        if (!box && state.storage.mailboxes.size >= state.limits.maxMailboxes) {
+          return sendError(res, 429, "信箱数量已达上限（maxMailboxes）");
         }
         const cursor = mailboxAppend(state.storage, mailboxId, envelope);
         state.relay.notifyActivity(mailboxId);
