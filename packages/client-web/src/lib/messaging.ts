@@ -332,6 +332,42 @@ function kpFromJson(raw: StoredKeyPair): KeyPair {
   return { publicKey: fromHex(raw.publicKey), privateKey: fromHex(raw.privateKey) };
 }
 
+/**
+ * 载入历史消息的基本形状校验（批次 A 残留收口）：早期缺陷曾把畸形载荷落库，
+ * 每次启动都会复现渲染兜底。逐字段校验本端实际消费的字段（含可选字段出现时的类型），
+ * 非法条目跳过不入内存（毒消息不再触发渲染期异常）；深层语义仍由消费点各自校验。
+ */
+function isStoredMessage(value: unknown): value is ChatMessage {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const m = value as Record<string, unknown>;
+  if (typeof m.id !== "string" || m.id === "") return false;
+  if (typeof m.did !== "string" || m.did === "") return false;
+  if (m.direction !== "in" && m.direction !== "out") return false;
+  if (m.kind !== "handshake" && m.kind !== "chat" && m.kind !== "image" && m.kind !== "file") return false;
+  if (typeof m.text !== "string") return false;
+  if (typeof m.at !== "number" || !Number.isFinite(m.at)) return false;
+  if (m.attachment !== undefined) {
+    if (typeof m.attachment !== "object" || m.attachment === null || Array.isArray(m.attachment)) return false;
+    const a = m.attachment as Record<string, unknown>;
+    for (const k of ["cid", "contentKey", "nonce", "name", "mime"]) {
+      if (typeof a[k] !== "string") return false;
+    }
+    if (typeof a.size !== "number" || !Number.isFinite(a.size) || a.size < 0) return false;
+  }
+  if (m.status !== undefined && m.status !== "sent" && m.status !== "delivered" && m.status !== "read") return false;
+  if (m.senderDid !== undefined && typeof m.senderDid !== "string") return false;
+  if (m.remoteId !== undefined && typeof m.remoteId !== "string") return false;
+  if (m.recalled !== undefined && typeof m.recalled !== "boolean") return false;
+  if (m.replyTo !== undefined) {
+    if (typeof m.replyTo !== "object" || m.replyTo === null || Array.isArray(m.replyTo)) return false;
+    const q = m.replyTo as Record<string, unknown>;
+    if (typeof q.text !== "string") return false;
+    if (q.mid !== undefined && typeof q.mid !== "string") return false;
+    if (q.authorName !== undefined && typeof q.authorName !== "string") return false;
+  }
+  return true;
+}
+
 export class Messaging {
   identity!: Identity;
   spk!: KeyPair;
@@ -673,9 +709,15 @@ export class Messaging {
     for (const key of keys) {
       const raw = await this.deps.kv.get(key);
       if (!raw) continue;
-      const message = JSON.parse(bytesToUtf8(raw)) as ChatMessage;
-      this.messageKeys.set(message.id, key);
-      list.push(message);
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(bytesToUtf8(raw));
+      } catch {
+        continue; // 破损条目跳过
+      }
+      if (!isStoredMessage(parsed)) continue;
+      this.messageKeys.set(parsed.id, key);
+      list.push(parsed);
     }
     list.sort((a, b) => a.at - b.at);
     this.messages.set(did, list);
