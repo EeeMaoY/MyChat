@@ -142,6 +142,16 @@ export function openGroupMessage(view: GroupView, payload: Uint8Array): OpenedGr
     signature: string;
     inner: string;
   };
+  // 内层信封字段类型守卫：外层 AEAD 只证明密文出自当前 epoch 成员之手，
+  // 不证明字段类型。若无守卫，"0" 这类字符串会经 setUint32 的 ToUint32
+  // 折叠通过验签、混入防重放比较（不可信输入不得进入密码学运算）。
+  if (typeof envelope.sender !== "string") throw new Error("群信封 sender 字段类型非法");
+  if (typeof envelope.epoch !== "number" || !Number.isSafeInteger(envelope.epoch) || envelope.epoch < 0) {
+    throw new Error("群信封 epoch 字段须为非负安全整数");
+  }
+  if (typeof envelope.index !== "number" || !Number.isSafeInteger(envelope.index) || envelope.index < 0) {
+    throw new Error("群信封 index 字段须为非负安全整数");
+  }
   if (envelope.v !== 1 || envelope.groupId !== view.state.groupId || envelope.epoch !== view.state.epoch) {
     throw new Error("群信封与当前群视角不一致");
   }
@@ -219,9 +229,23 @@ export function applyGroupKeysPayload(payload: GroupKeysPayload, prevState?: Gro
   if (state.groupId !== payload.groupId || state.epoch !== payload.epoch) {
     throw new Error("群密钥载荷与群状态不一致");
   }
+  // 不可信输入守卫（SR-5：分发通道可信 ≠ 内容免验）：载荷任何条目不合法
+  // 即整载荷拒绝——非法条目若静默跳过，会造成成员间视角分叉。
+  if (!Array.isArray(payload.senderKeys)) throw new Error("群密钥载荷 senderKeys 须为数组");
+  if (typeof payload.groupSecret !== "string") throw new Error("群密钥载荷 groupSecret 缺失或类型非法");
+  const groupSecret = base58Decode(payload.groupSecret);
+  if (groupSecret.length !== AEAD_KEY_LENGTH) throw new Error("群密钥载荷 groupSecret 解码后须为 32 字节");
+  const memberDids = new Set(state.members.map((m) => m.did));
   const senderKeys = new Map<string, Uint8Array>();
-  for (const entry of payload.senderKeys) {
-    senderKeys.set(entry.did, base58Decode(entry.key));
+  for (const item of payload.senderKeys as unknown[]) {
+    const entry = item as { did?: unknown; key?: unknown } | null;
+    if (entry === null || typeof entry !== "object" || typeof entry.did !== "string" || typeof entry.key !== "string") {
+      throw new Error("群密钥载荷发送密钥条目须为 {did, key}");
+    }
+    if (!memberDids.has(entry.did)) throw new Error(`群密钥载荷包含非群成员 ${entry.did} 的发送密钥`);
+    const key = base58Decode(entry.key);
+    if (key.length !== AEAD_KEY_LENGTH) throw new Error(`群密钥载荷 ${entry.did} 的发送密钥解码后须为 32 字节`);
+    senderKeys.set(entry.did, key);
   }
-  return createGroupView(state, base58Decode(payload.groupSecret), senderKeys, prevState);
+  return createGroupView(state, groupSecret, senderKeys, prevState);
 }
