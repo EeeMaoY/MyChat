@@ -3,7 +3,7 @@
  * 排序仅按时间（无算法推荐，Non-Goals）；删除为墓碑语义——已缓存副本
  * 无法物理强制删除，UI 如实告知（FR-4.4 固有边界）。
  */
-import { useEffect, useRef, useState, type ChangeEvent } from "react";
+import { useRef, useState, type ChangeEvent } from "react";
 
 import { commentMoment, deleteMoment, likeMoment, publishMoment, setNotice, useAppState } from "../lib/app";
 import type { MomentItem } from "../lib/messaging";
@@ -22,9 +22,6 @@ export default function TimelinePage({ onBack }: { onBack: () => void }) {
   const [pending, setPending] = useState(false);
   const [commentDraft, setCommentDraft] = useState<{ cid: string; text: string } | null>(null);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
-
-  // 图片选择后立即读入（≤8MB）
-  useEffect(() => () => setFile(null), []);
 
   async function handleFile(e: ChangeEvent<HTMLInputElement>): Promise<void> {
     const input = e.target;
@@ -67,7 +64,7 @@ export default function TimelinePage({ onBack }: { onBack: () => void }) {
     try {
       await commentMoment(item.authorDid, item.cid, commentDraft.text.trim());
       setCommentDraft(null);
-      setNotice("留言已发送（仅对方可见）");
+      setNotice("留言已发送（作者与好友圈可见）");
     } catch (err) {
       setNotice(err instanceof Error ? err.message : "留言失败");
     }
@@ -153,8 +150,7 @@ export default function TimelinePage({ onBack }: { onBack: () => void }) {
                         title="点赞（作者与全部好友可见）"
                         onClick={async () => {
                           const err = await likeMoment(m.authorDid, m.cid);
-                          if (err !== null && err !== "已赞过该动态") setNotice(err);
-                          else if (err === "已赞过该动态") setNotice("已赞过该动态");
+                          if (err !== null) setNotice(err);
                         }}
                       >
                         ❤️
@@ -178,7 +174,7 @@ export default function TimelinePage({ onBack }: { onBack: () => void }) {
                     <input
                       className="input"
                       value={commentDraft.text}
-                      placeholder="留言（仅作者可见）"
+                      placeholder="留言（作者与好友圈可见）"
                       autoFocus
                       onChange={(e) => setCommentDraft({ cid: m.cid, text: e.target.value })}
                       onKeyDown={(e) => {

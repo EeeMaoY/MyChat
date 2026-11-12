@@ -378,13 +378,13 @@ export async function resetMomentCircle(): Promise<void> {
   await messaging.resetMomentCircle();
 }
 
-/** 评论好友动态（v1 仅作者可见）。 */
 /** 撤回自己发送的消息（S16）：本地占位 + 对端同步占位。 */
 export async function recallMessage(chatKey: string, ids: string[]): Promise<void> {
   if (!messaging) throw new Error("应用尚未就绪");
   await messaging.recallMessages(chatKey, ids);
 }
 
+/** 评论好友动态（v0.2 好友圈共享：评论条目发布到作者日志，可见性集合内成员均可聚合阅读）。 */
 export async function commentMoment(authorDid: string, cid: string, text: string): Promise<void> {
   if (!messaging) throw new Error("应用尚未就绪");
   await messaging.commentMoment(authorDid, cid, text);
@@ -417,12 +417,12 @@ export async function addGroupMember(groupId: string, memberDid: string): Promis
   return (await messaging?.addMemberToGroup(groupId, memberDid)) ?? "应用尚未就绪";
 }
 
-/** 移除成员（群主，FR-6.2 断读：被移除者不可达新 epoch 的信箱与密钥）。 */
 /** 单群实时摘要（直读 messaging 实例，供群聊头防弹取值）。 */
 export function getGroupSummary(groupId: string): GroupSummary | null {
   return messaging?.getGroupSummary(groupId) ?? null;
 }
 
+/** 移除成员（群主，FR-6.2 断读：被移除者不可达新 epoch 的信箱与密钥）。 */
 export async function removeGroupMember(groupId: string, memberDid: string): Promise<string | null> {
   return (await messaging?.removeMemberFromGroup(groupId, memberDid)) ?? "应用尚未就绪";
 }
