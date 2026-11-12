@@ -17,14 +17,21 @@ export interface KTLogStore {
   /** did → 事件下标数组（加速 list） */
   byDid: Map<string, number[]>;
   nextIndex: number;
+  /** 手动事件（POST /v0/kt/append）下标集——快照导出与自动锚定事件区分（M4-S16） */
+  manualIndices: Set<number>;
 }
 
 export function createKTLogStore(): KTLogStore {
-  return { events: [], leaves: [], rootHistory: [], byDid: new Map(), nextIndex: 0 };
+  return { events: [], leaves: [], rootHistory: [], byDid: new Map(), nextIndex: 0, manualIndices: new Set() };
 }
 
-export function appendEvent(store: KTLogStore, event: Omit<KTEvent, "index">): KTEvent {
+export function appendEvent(
+  store: KTLogStore,
+  event: Omit<KTEvent, "index">,
+  opts: { manual?: boolean } = {},
+): KTEvent {
   const full: KTEvent = { ...event, index: store.nextIndex++ };
+  if (opts.manual === true) store.manualIndices.add(full.index);
   store.events.push(full);
   store.leaves.push(ktLeafHash(full));
   store.rootHistory.push({ afterIndex: full.index, root: ktMerkleRoot(store.leaves) });

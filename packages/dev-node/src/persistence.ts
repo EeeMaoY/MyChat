@@ -26,7 +26,8 @@ export type PersistRecord =
   | { t: "block"; cid: string; bytes: string }
   | { t: "block-delete"; cid: string }
   | { t: "envelope"; mailboxId: string; envelope: Record<string, unknown> }
-  | { t: "recovery"; did: string; json: string };
+  | { t: "recovery"; did: string; json: string }
+  | { t: "kt-manual"; did: string; type: string; payload: string };
 
 export interface Persistence {
   append(record: PersistRecord): void;

@@ -146,6 +146,9 @@ function replayPersisted(state: NodeState, records: PersistRecord[]): void {
       case "recovery":
         state.recovery.set(r.did, r.json);
         break;
+      case "kt-manual":
+        appendEvent(state.ktlog, { did: r.did, type: parseKTType(r.type), payload: new Uint8Array(Buffer.from(r.payload, "base64")) }, { manual: true });
+        break;
     }
   }
 }
@@ -189,6 +192,10 @@ function exportStateAsRecords(state: NodeState): PersistRecord[] {
   }
   for (const [did, json] of state.recovery) {
     out.push({ t: "recovery", did, json });
+  }
+  for (const index of [...state.ktlog.manualIndices].sort((a, b) => a - b)) {
+    const event = state.ktlog.events[index]!;
+    out.push({ t: "kt-manual", did: event.did, type: event.type, payload: Buffer.from(event.payload).toString("base64") });
   }
   return out;
 }
@@ -545,10 +552,20 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
     }
     if (req.method === "POST" && url.pathname === "/v0/kt/append") {
       const body = await readJson(req);
-      const event = appendEvent(state.ktlog, {
-        did: String(body.did ?? ""),
-        type: parseKTType(body.type),
-        payload: new Uint8Array(Buffer.from(String(body.payload ?? ""), "base64")),
+      const event = appendEvent(
+        state.ktlog,
+        {
+          did: String(body.did ?? ""),
+          type: parseKTType(body.type),
+          payload: new Uint8Array(Buffer.from(String(body.payload ?? ""), "base64")),
+        },
+        { manual: true },
+      );
+      state.persistence.append({
+        t: "kt-manual",
+        did: event.did,
+        type: event.type,
+        payload: Buffer.from(event.payload).toString("base64"),
       });
       return sendJson(res, 201, { event: serializeKTEvent(event) });
     }
