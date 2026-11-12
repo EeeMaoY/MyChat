@@ -45,6 +45,8 @@ export default function RecoveryWizard({ onFinished, onActivated, onCancel }: Pr
   const [requestPending, setRequestPending] = useState(false);
   const [requestError, setRequestError] = useState<string | null>(null);
   const [collect, setCollect] = useState<{ progress: number; needed: number }>({ progress: 0, needed: 0 });
+  /** 分片收集/重组失败态（tick 异常不再成为 unhandled rejection，进度不再无提示冻结）。 */
+  const [collectError, setCollectError] = useState<string | null>(null);
 
   /** onFinished 经 ref 转发，避免 App 重渲染重置成功页定时器。 */
   const finishedRef = useRef(onFinished);
@@ -103,26 +105,37 @@ export default function RecoveryWizard({ onFinished, onActivated, onCancel }: Pr
       return;
     }
     setCollect({ progress: 0, needed: 0 });
+    setCollectError(null);
     setStep(4);
   }
 
-  // 步骤 4：每 2s 轮询收集进度；done 时 lib 已完成导入并切到 main
+  // 步骤 4：每 2s 轮询收集进度；done 时 lib 已完成导入并切到 main。
+  // tick 异常（分片重组失败等）转入错误态并停表——"返回"上一步后重新发送可重试。
   useEffect(() => {
     if (step !== 4) return;
     let alive = true;
+    let timer: number | null = null;
     async function tick(): Promise<void> {
-      const r = await recoveryPollCollect();
+      let r: Awaited<ReturnType<typeof recoveryPollCollect>>;
+      try {
+        r = await recoveryPollCollect();
+      } catch (err) {
+        if (!alive) return;
+        setCollectError(err instanceof Error ? err.message : "分片收集失败");
+        if (timer !== null) window.clearInterval(timer);
+        return;
+      }
       if (!alive) return;
       setCollect({ progress: r.progress, needed: r.needed });
       if (r.done) setStep(5);
     }
     void tick();
-    const timer = window.setInterval(() => {
+    timer = window.setInterval(() => {
       void tick();
     }, COLLECT_INTERVAL_MS);
     return () => {
       alive = false;
-      window.clearInterval(timer);
+      if (timer !== null) window.clearInterval(timer);
     };
   }, [step]);
 
@@ -265,6 +278,7 @@ export default function RecoveryWizard({ onFinished, onActivated, onCancel }: Pr
             <p className="field-hint">
               已收集 {collect.progress} / {collect.needed > 0 ? collect.needed : "…"} 位联系人的分片
             </p>
+            {collectError !== null && <p className="field-error">{collectError}</p>}
             <div className="modal-actions">
               <button className="btn-ghost" type="button" onClick={() => setStep(3)}>
                 返回

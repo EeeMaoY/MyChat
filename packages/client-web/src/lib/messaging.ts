@@ -1803,21 +1803,48 @@ export class Messaging {
   /** 已收集的恢复分片（恢复收集器）。 */
   collectedShares: { shareX: number; shareY: string; fromDid: string }[] = [];
 
-  /** 恢复完成判定：收集数达门限后重组 RK → 解开身份包裹（v2：身份 + 用户名）。 */
+  /**
+   * 恢复完成判定：收集数达门限后重组 RK → 解开身份包裹（v2：身份 + 用户名）。
+   * 分片按 shareX 去重后，在 C(n, threshold) 组合（上限 120，防组合爆炸）内逐一尝试：
+   * 重复/异源的 x 组合插值出错误 RK，只能在 openIdentityWrap 的 AEAD 认证处失败——
+   * 任一组合成功即返回；全部失败抛领域错误（调用方呈现在恢复向导错误态）。
+   */
   async tryFinishRecovery(
     ownerDid: string,
     wrapCid: string,
     threshold: number,
   ): Promise<{ identityJson: string; myName: string | null } | null> {
+    void ownerDid;
     if (this.collectedShares.length < threshold) return null;
-    const shares = this.collectedShares.slice(0, threshold).map((s) => ({
-      x: s.shareX,
-      y: base58Decode(s.shareY),
-    }));
-    const rk = recoverRk(shares, 32);
+    const unique = new Map<number, (typeof this.collectedShares)[number]>();
+    for (const s of this.collectedShares) {
+      if (!unique.has(s.shareX)) unique.set(s.shareX, s);
+    }
+    if (unique.size < threshold) return null; // 去重后不足门限：继续等待新分片
+    const pool = [...unique.values()];
     const wrapCiphertext = await this.deps.api.getBlock(wrapCid);
     if (!wrapCiphertext) throw new Error("身份包裹块不存在（节点无此数据）");
-    return openIdentityWrap(rk, wrapCiphertext);
+
+    // 组合枚举（下标字典序）：idx[i] 取值 [i, n-k+i]，逐步推进到下一组合
+    const MAX_ATTEMPTS = 120;
+    const n = pool.length;
+    const k = threshold;
+    const idx = Array.from({ length: k }, (_, i) => i);
+    for (let attempts = 0; attempts < MAX_ATTEMPTS; attempts++) {
+      const shares = idx.map((i) => ({ x: pool[i]!.shareX, y: base58Decode(pool[i]!.shareY) }));
+      try {
+        const rk = recoverRk(shares, 32);
+        return openIdentityWrap(rk, wrapCiphertext);
+      } catch {
+        // 该组合失败（坏片/错片/异源分片）：尝试下一组合
+      }
+      let i = k - 1;
+      while (i >= 0 && idx[i] === n - k + i) i -= 1;
+      if (i < 0) break; // 组合枚举穷尽
+      idx[i]! += 1;
+      for (let j = i + 1; j < k; j++) idx[j] = idx[j - 1]! + 1;
+    }
+    throw new Error("分片重组失败：已尝试全部分片组合仍未解开身份包裹（分片可能损坏或来自不同的恢复设置）");
   }
 
   /**
@@ -2183,9 +2210,24 @@ export class Messaging {
       return null;
     }
     if (payload.type === "recovery-share") {
-      // 收到守护者回传的分片（恢复收集器）
-      this.collectedShares.push({ shareX: payload.shareX, shareY: payload.shareY, fromDid: did });
-      this.emit();
+      // 收到守护者回传的分片（恢复收集器）。入队前校验 + 去重：
+      // shareX 须在 1..255（core 的 Share.x 为单字节索引）、shareY 须可 base58 解码；
+      // 同 (shareX, fromDid) 只收首份——重复 x 的分片插值出错误 RK（AEAD 失败）。
+      let shapeOk = Number.isInteger(payload.shareX) && payload.shareX >= 1 && payload.shareX <= 255;
+      if (shapeOk) {
+        try {
+          base58Decode(payload.shareY);
+        } catch {
+          shapeOk = false;
+        }
+      }
+      if (
+        shapeOk &&
+        !this.collectedShares.some((s) => s.shareX === payload.shareX && s.fromDid === did)
+      ) {
+        this.collectedShares.push({ shareX: payload.shareX, shareY: payload.shareY, fromDid: did });
+        this.emit();
+      }
       return null;
     }
     if (payload.type === "group-keys") {
