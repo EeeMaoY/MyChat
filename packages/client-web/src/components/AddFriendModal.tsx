@@ -1,7 +1,7 @@
-/** 加好友弹窗：对方用户名 + 附言（选填）。错误内联；成功后打开该会话。 */
+/** 加好友弹窗：对方用户名 + 附言（选填）。错误内联；成功后用返回的 did 打开该会话。 */
 import { useState, type FormEvent } from "react";
 
-import { addFriend, openChat, useAppState } from "../lib/app";
+import { addFriend, openChat } from "../lib/app";
 
 import Modal from "./Modal";
 
@@ -12,7 +12,6 @@ interface Props {
 const NOTE_PLACEHOLDER = "希望与你建立端到端加密聊天";
 
 export default function AddFriendModal({ onClose }: Props) {
-  const state = useAppState();
   const [name, setName] = useState("");
   const [note, setNote] = useState("");
   const [error, setError] = useState<string | null>(null);
@@ -27,15 +26,14 @@ export default function AddFriendModal({ onClose }: Props) {
     }
     setPending(true);
     setError(null);
-    const err = await addFriend(trimmed, note.trim());
+    const res = await addFriend(trimmed, note.trim());
     setPending(false);
-    if (err !== null) {
-      setError(err);
+    if (res.error !== null) {
+      setError(res.error);
       return;
     }
-    // lib 成功后会把 activeDid 指到旧会话，这里显式打开刚添加的联系人
-    const target = state.contacts.find((c) => c.name === trimmed);
-    if (target !== undefined) openChat(target.did);
+    // 用返回的新联系人 did 直接打开会话（旧实现按名字在 await 前的陈旧快照里 find，必 undefined 不跳转）
+    if (res.did !== null) openChat(res.did);
     onClose();
   }
 

@@ -779,19 +779,21 @@ export class Messaging {
 
   /**
    * 解析用户名 → 验签记录与 bundle → X3DH 发起 → 握手信封投递到对方发现信箱。
-   * 返回错误文案（null = 成功）；异常不抛出到 UI 层。
+   * 返回 { error, did }：error 为错误文案（null = 成功），did 为新联系人的 DID
+   * （成功必非空）——调用方直接定位会话，不得从 contacts 快照猜测（首键是最旧联系人）。
+   * 异常不抛出到 UI 层。
    */
-  async addFriend(name: string, note: string): Promise<string | null> {
+  async addFriend(name: string, note: string): Promise<{ error: string | null; did: string | null }> {
     try {
       const record = await this.deps.api.resolve(name);
-      if (!record) return "用户名不存在";
-      if (!verifyUserNameRecord(record)) return "用户名记录验签失败（映射可能被篡改）";
+      if (!record) return { error: "用户名不存在", did: null };
+      if (!verifyUserNameRecord(record)) return { error: "用户名记录验签失败（映射可能被篡改）", did: null };
 
       const bundleBytes = await this.deps.api.getBundle(record.did);
-      if (!bundleBytes) return "对方预密钥束不可用";
+      if (!bundleBytes) return { error: "对方预密钥束不可用", did: null };
       const bundle = decodePreKeyBundle(bundleBytes);
       if (bundle.did !== record.did || !verifyPreKeyBundle(bundle)) {
-        return "对方预密钥束验签失败";
+        return { error: "对方预密钥束验签失败", did: null };
       }
 
       const handshake: HandshakePayload = {
@@ -814,9 +816,9 @@ export class Messaging {
       // 新好友：分发我的好友圈密钥（对方的 key 由对方主动发来，M3-S12）
       void this.distributeMomentKeys().catch(() => undefined);
       this.emit();
-      return null;
+      return { error: null, did: record.did };
     } catch (err) {
-      return err instanceof Error ? err.message : "添加失败";
+      return { error: err instanceof Error ? err.message : "添加失败", did: null };
     }
   }
 

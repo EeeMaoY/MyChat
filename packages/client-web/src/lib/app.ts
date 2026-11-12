@@ -293,11 +293,12 @@ export function skipUsername(): void {
   void messaging?.poll();
 }
 
-export async function addFriend(name: string, note: string): Promise<string | null> {
-  if (!messaging) return "应用尚未就绪";
-  const error = await messaging.addFriend(name, note);
-  if (error === null) setState({ activeDid: messaging!.contacts.get(messaging!.contacts.keys().next().value as string)?.did ?? state.activeDid });
-  return error;
+/** 加好友：成功返回 { error: null, did } 并直接打开新会话（did 为新联系人，不从快照猜测）。 */
+export async function addFriend(name: string, note: string): Promise<{ error: string | null; did: string | null }> {
+  if (!messaging) return { error: "应用尚未就绪", did: null };
+  const result = await messaging.addFriend(name, note);
+  if (result.error === null && result.did !== null) setState({ activeDid: result.did });
+  return result;
 }
 
 /** 发送消息（1:1 与群统一入口；群会话键 group:<groupId>，M3-S11；replyTo 引用快照 S17）。 */
@@ -564,8 +565,8 @@ export async function recoveryStart(ownerName: string): Promise<RecoveryStepResu
 /** 第 2 步：以临时身份添加守护者（复用加好友握手；守护者侧将看到恢复请求说明）。 */
 export async function recoveryAddGuardian(name: string): Promise<RecoveryStepResult> {
   if (!recoveryCtx) return { ok: false, error: "请先启动恢复流程" };
-  const err = await recoveryCtx.messaging.addFriend(name, `我是账户 ${recoveryCtx.ownerDid} 的所有者，正在通过紧急联系人恢复访问权限`);
-  return err === null ? { ok: true } : { ok: false, error: err };
+  const { error } = await recoveryCtx.messaging.addFriend(name, `我是账户 ${recoveryCtx.ownerDid} 的所有者，正在通过紧急联系人恢复访问权限`);
+  return error === null ? { ok: true } : { ok: false, error };
 }
 
 /** 第 3 步：向全部守护者广播恢复请求（触发对方的分片回传）。 */
