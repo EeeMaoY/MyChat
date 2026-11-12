@@ -10,7 +10,7 @@
  * applicationServerKey 必须与发送时私钥匹配）；纯内存模式每次重启重新生成
  * （旧订阅失效——开发属性，如实登记）。
  */
-import { existsSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createRequire } from "node:module";
 
@@ -51,7 +51,10 @@ function loadOrCreateVapid(persistDir: string | undefined): { publicKey: string;
       }
     }
     const keys = webpush.generateVAPIDKeys();
-    writeFileSync(path, JSON.stringify(keys));
+    // tmp+rename 原子写：防进程中断留下半截密钥文件（下次启动误判损坏而换钥，旧订阅全失效）
+    const tmp = `${path}.tmp`;
+    writeFileSync(tmp, JSON.stringify(keys));
+    renameSync(tmp, path);
     return keys;
   }
   return webpush.generateVAPIDKeys();

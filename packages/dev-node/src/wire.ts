@@ -15,6 +15,7 @@ export interface EnvelopeJson {
 }
 
 const MAX_PAYLOAD = 131_072; // 与填充最高档一致（防滥用上限）
+const MAX_VERSION_LENGTH = 64; // 防超长 version 字段滥用（合法版本号远小于此）
 
 export function envelopeToJson(e: Envelope): EnvelopeJson {
   return {
@@ -31,7 +32,7 @@ export function envelopeToJson(e: Envelope): EnvelopeJson {
 export function envelopeFromJson(j: unknown): Envelope {
   if (typeof j !== "object" || j === null) throw new Error("信封格式非法");
   const e = j as Record<string, unknown>;
-  if (typeof e.version !== "string" || e.version.length === 0) throw new Error("信封 version 非法");
+  if (typeof e.version !== "string" || e.version.length === 0 || e.version.length > MAX_VERSION_LENGTH) throw new Error("信封 version 非法");
   if (typeof e.epoch !== "number" || !Number.isInteger(e.epoch) || e.epoch < 0) throw new Error("信封 epoch 非法");
   if (typeof e.toPseudonym !== "string" || e.toPseudonym.length === 0 || e.toPseudonym.length > 128) {
     throw new Error("信封伪地址非法");

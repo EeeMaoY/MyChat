@@ -451,7 +451,7 @@ describe("Storage（块 + 信箱）", () => {
     expect(empty.envelopes).toHaveLength(0);
   });
 
-  it("畸形信封被拒（nonce 长度 / 档位 / 空负载）", async () => {
+  it("畸形信封被拒（nonce 长度 / 档位 / 空负载 / 超长 version）", async () => {
     const mailbox = "mailbox-bad-envelope";
     const bad = makeEnvelope(mailbox);
     bad.nonce = randomBytes(12); // AES-GCM 长度，不是 XChaCha 的 24
@@ -461,6 +461,22 @@ describe("Storage（块 + 信箱）", () => {
       body: JSON.stringify({ envelope: envelopeToJson(bad) }),
     });
     expect(res.status).toBe(400);
+
+    // version 超长（>64）：防超长字段滥用
+    const longVersion = { ...envelopeToJson(makeEnvelope(mailbox)), version: "x".repeat(65) };
+    const longRes = await fetch(`${base}/v0/storage/mailboxes/${encodeURIComponent(mailbox)}/append`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ envelope: longVersion }),
+    });
+    expect(longRes.status).toBe(400);
+  });
+
+  it("畸形百分号编码路径返回 400（不冒泡 500）", async () => {
+    // %zz 非法百分号序列：decodeURIComponent 抛 URIError，统一解码层应回 400
+    expect((await fetch(`${base}/v0/registry/resolve/%zz`)).status).toBe(400);
+    expect((await fetch(`${base}/v0/storage/mailboxes/%zz/append`, { method: "POST", body: "{}" })).status).toBe(400);
+    expect((await fetch(`${base}/v0/storage/blocks/%ff%fe`, { method: "DELETE" })).status).toBe(400);
   });
 });
 

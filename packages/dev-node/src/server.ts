@@ -295,7 +295,9 @@ export function startDevNode(
       res.end();
       return;
     }
-    handleHttp(state, req, res).catch(() => {
+    handleHttp(state, req, res).catch((err) => {
+      // 服务端日志记录完整错误（不回显给客户端——零信任节点不泄露内部状态）
+      console.error("[mychat-dev-node] 请求处理失败:", err);
       if (!res.headersSent) sendError(res, 500, "内部错误");
       res.end();
     });
@@ -400,14 +402,17 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
       return sendJson(res, 201, { ok: true, ktIndex: record.ktIndex });
     }
     if (req.method === "GET" && parts[1] === "registry" && parts[2] === "resolve" && typeof parts[3] === "string") {
-      const record = resolveName(state.registry, decodeURIComponent(parts[3]));
+      const name = decodePathSegment(parts[3]);
+      if (name === null) return sendError(res, 400, "路径编码非法");
+      const record = resolveName(state.registry, name);
       if (!record) return sendError(res, 404, "用户名不存在");
       return sendJson(res, 200, { record: serializeRecord(record) });
     }
 
     // ----- 设备注册表（M2-S10 FR-1.4：凭证登记/吊销/列表，设计报告 §4.2）-----
     if (parts[1] === "registry" && parts[2] === "devices" && typeof parts[3] === "string") {
-      const did = decodeURIComponent(parts[3]);
+      const did = decodePathSegment(parts[3]);
+      if (did === null) return sendError(res, 400, "路径编码非法");
       try {
         didToEd25519PublicKey(did);
       } catch {
@@ -441,7 +446,8 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
         return sendJson(res, 201, { ok: true, dkId: result.certificate.dkId });
       }
       if (req.method === "DELETE" && typeof parts[4] === "string") {
-        const dkId = decodeURIComponent(parts[4]);
+        const dkId = decodePathSegment(parts[4]);
+        if (dkId === null) return sendError(res, 400, "路径编码非法");
         const body = await readJson(req);
         if (typeof body.revocation !== "object" || body.revocation === null) {
           return sendError(res, 400, "吊销声明格式非法");
@@ -478,7 +484,8 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
 
     // ----- 预密钥束分发（Registry 角色扩展，设计报告 §5.2；M2-S10 起按设备分槽）-----
     if (parts[1] === "registry" && parts[2] === "bundle" && typeof parts[3] === "string") {
-      const did = decodeURIComponent(parts[3]);
+      const did = decodePathSegment(parts[3]);
+      if (did === null) return sendError(res, 400, "路径编码非法");
       // DID 格式校验（防任意键污染）
       try {
         didToEd25519PublicKey(did);
@@ -574,7 +581,8 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
 
     // ----- 恢复公告（社交恢复 FR-1.3，设计报告 §4.3：节点按 DID 存当前公告）-----
     if (parts[1] === "registry" && parts[2] === "recovery" && typeof parts[3] === "string") {
-      const did = decodeURIComponent(parts[3]);
+      const did = decodePathSegment(parts[3]);
+      if (did === null) return sendError(res, 400, "路径编码非法");
       try {
         didToEd25519PublicKey(did);
       } catch {
@@ -625,7 +633,9 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
       return sendJson(res, 200, { proof });
     }
     if (req.method === "GET" && parts[1] === "kt" && parts[2] === "list" && typeof parts[3] === "string") {
-      return sendJson(res, 200, { events: listEvents(state.ktlog, decodeURIComponent(parts[3])).map(serializeKTEvent) });
+      const did = decodePathSegment(parts[3]);
+      if (did === null) return sendError(res, 400, "路径编码非法");
+      return sendJson(res, 200, { events: listEvents(state.ktlog, did).map(serializeKTEvent) });
     }
     if (req.method === "GET" && url.pathname === "/v0/kt/leaves") {
       // 前缀一致性材料（M3-S11 捎带）：index > after 的叶哈希（base58，日志顺序）
@@ -670,7 +680,8 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
 
     // ----- Storage: blocks -----
     if (parts[1] === "storage" && parts[2] === "blocks" && typeof parts[3] === "string") {
-      const cid = decodeURIComponent(parts[3]);
+      const cid = decodePathSegment(parts[3]);
+      if (cid === null) return sendError(res, 400, "路径编码非法");
       if (req.method === "PUT") {
         if (!state.limiters.blockPut.allow("global")) {
           return sendError(res, 429, "块写入过于频繁（节点限流）");
@@ -708,7 +719,8 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
 
     // ----- Storage: mailboxes -----
     if (parts[1] === "storage" && parts[2] === "mailboxes" && typeof parts[3] === "string") {
-      const mailboxId = decodeURIComponent(parts[3]);
+      const mailboxId = decodePathSegment(parts[3]);
+      if (mailboxId === null) return sendError(res, 400, "路径编码非法");
       if (req.method === "POST" && parts[4] === "append") {
         if (!state.limiters.mailboxAppend.allow(mailboxId)) {
           return sendError(res, 429, "信箱写入过于频繁（节点限流）");
@@ -807,6 +819,15 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
 }
 
 class BadRequestError extends Error {}
+
+/** 路径段解码统一入口：畸形百分号编码返回 null（调用方回 400，防 URIError 冒泡成 500）。 */
+function decodePathSegment(raw: string): string | null {
+  try {
+    return decodeURIComponent(raw);
+  } catch {
+    return null;
+  }
+}
 
 async function readBody(req: IncomingMessage): Promise<Buffer> {
   const chunks: Buffer[] = [];
