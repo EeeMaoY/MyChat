@@ -14,6 +14,9 @@ import {
   createIdentity,
   decodePreKeyBundle,
   decodeSessionWire,
+  didToEd25519PublicKey,
+  ed25519Verify,
+  ikxBindingMessage,
   type Envelope,
   type GroupKeysPayload,
   type GroupState,
@@ -100,6 +103,26 @@ interface HandshakePayload {
   fromDid: string;
   fromName: string | null;
   note: string;
+  /** 发起方 IK-x 绑定签名（base58；即 Identity.ikxBindingSig，公开材料）：接收方据此把 fromDid 绑定到 X3DH 身份 */
+  ikxSig: string;
+}
+
+/**
+ * 握手身份绑定校验（防会话劫持）：fromDid 是明文自报字段，采信前必须绑定到 X3DH 密码学身份。
+ *
+ * IK-x（X25519）与 DID 本体（IK-ed，Ed25519）是两把独立密钥，二者只靠 ikxBindingSig 绑定，
+ * 不能逐字节比较。故校验分两步成立：
+ * 1. acceptSession 成功 ⇒ 发起方持有 wire 头 ikxSenderPublic 对应的私钥（否则 X3DH 算不出 SK，AEAD 解密失败）；
+ * 2. 本函数验签通过 ⇒ 该 IK-x 公钥确由 fromDid 的 IK-ed 私钥签名认可。
+ * 仅重放他人公开的绑定签名无法通过第 1 步，仅自造 IK-x 无法通过第 2 步。
+ */
+function verifyHandshakeIdentity(fromDid: string, ikxSig: unknown, ikxSenderPublic: Uint8Array): boolean {
+  if (typeof ikxSig !== "string") return false;
+  try {
+    return ed25519Verify(base58Decode(ikxSig), ikxBindingMessage(ikxSenderPublic), didToEd25519PublicKey(fromDid));
+  } catch {
+    return false; // DID 非法 / base58 非法 / 签名长度非法
+  }
 }
 
 export interface Contact {
@@ -732,6 +755,7 @@ export class Messaging {
         fromDid: this.identity.did,
         fromName: this.myName,
         note: note || (this.myName ? `${this.myName} 请求添加你为好友` : "请求添加你为好友"),
+        ikxSig: base58Encode(this.identity.ikxBindingSig),
       };
       const { session, wire } = initiateSession(this.identity, bundle, utf8ToBytes(JSON.stringify(handshake)));
 
@@ -1824,6 +1848,7 @@ export class Messaging {
         fromDid: this.identity.did,
         fromName: this.myName,
         note: "检测到你的设备状态变化，我已轮换会话密钥（自动重建，历史消息保留）",
+        ikxSig: base58Encode(this.identity.ikxBindingSig),
       };
       const { session, wire } = initiateSession(this.identity, bundle, utf8ToBytes(JSON.stringify(handshake)));
       const envelope = this.seal(wire, discoveryInboxId(did));
@@ -1914,6 +1939,8 @@ export class Messaging {
       }
       const handshake = JSON.parse(bytesToUtf8(plaintext)) as HandshakePayload;
       if (handshake.v !== 1 || typeof handshake.fromDid !== "string") return;
+      // 自报 fromDid 未绑定到 X3DH 发起方身份：静默丢弃（否则可顶替已有联系人会话 / 伪造 DID 入申请队列）
+      if (!verifyHandshakeIdentity(handshake.fromDid, handshake.ikxSig, msg.x3dh.ikxSenderPublic)) return;
 
       // M3 修复（好友确认流）：已知好友的新握手沿用 S9 替换语义（设备变更/恢复场景）；
       // 陌生人首次握手完成密码学处理（accept + OPK 消耗，与 Signal 语义一致）后
