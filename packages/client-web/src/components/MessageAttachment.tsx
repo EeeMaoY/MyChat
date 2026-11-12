@@ -9,6 +9,13 @@ import { formatBytes } from "./format";
 /** cid → objectURL 模块级缓存：同一附件只取块解密一次（图片与下载共享）。 */
 const objectUrlCache = new Map<string, string>();
 
+/**
+ * 允许以顶层文档在新标签页打开的位图 MIME 白名单。
+ * mime 来自对端载荷，不可信：blob URL 继承应用源，image/svg+xml 等可执行脚本的类型一旦以顶层文档打开，
+ * 脚本即可读本源 IndexedDB（私钥）。<img> 渲染不执行脚本，不受此限。
+ */
+const NEW_TAB_IMAGE_MIMES = ["image/png", "image/jpeg", "image/webp", "image/gif"];
+
 /** Uint8Array → Blob（复制进独立 ArrayBuffer，兼容 BlobPart 的类型约束）。 */
 function toBlob(data: Uint8Array, mime: string): Blob {
   return new Blob([new Uint8Array(data)], { type: mime });
@@ -64,7 +71,13 @@ export function ImageBubble({ attachment }: { attachment: AttachmentMeta }) {
       src={state.url}
       alt={attachment.name}
       title={attachment.name}
-      onClick={() => window.open(state.url, "_blank", "noopener")}
+      onClick={() => {
+        if (!NEW_TAB_IMAGE_MIMES.includes(attachment.mime)) {
+          setNotice("该图片类型不支持在新标签页打开");
+          return;
+        }
+        window.open(state.url, "_blank", "noopener");
+      }}
     />
   );
 }
