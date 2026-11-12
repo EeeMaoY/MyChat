@@ -248,7 +248,8 @@ type SessionPayload =
   | { v: 1; type: "custody-request"; forName: string | null }
   | { v: 1; type: "custody-reply"; cid: string; contentKey: string; nonce: string }
   /** 社交恢复（FR-1.3）：邀请成为守护者 / 请求回传分片 / 回传分片（设计报告 §4.3） */
-  | { v: 1; type: "guardian-invite"; did: string; wrapCid: string; sealedShare: string }
+  /** guardian-invite 的 did 为发送方自报，接收方不采信——归属一律以会话对端 did 为准 */
+  | { v: 1; type: "guardian-invite"; did?: string; wrapCid: string; sealedShare: string }
   | { v: 1; type: "recovery-request"; did: string }
   | { v: 1; type: "recovery-share"; did: string; shareX: number; shareY: string }
   /** 群组（FR-6.1，M3-S11）：群密钥分发载荷（经 1:1 DR 会话，被移除者不可达） */
@@ -2055,8 +2056,10 @@ export class Messaging {
     }
     if (payload.type === "guardian-invite") {
       // 成为守护者：静默存储分片包（ECIES 密文，仅我可解）；列表可见（UX-2 "紧急联系人"心智）
+      // 键必须用会话对端 did（密码学认证）：载荷内自报的 did 不可采信，否则任意联系人可覆盖/栽赃他人的真实分片
+      if (typeof payload.wrapCid !== "string" || typeof payload.sealedShare !== "string") return null;
       await this.deps.kv.put(
-        `guardianship:${payload.did}`,
+        `guardianship:${did}`,
         utf8ToBytes(JSON.stringify({ wrapCid: payload.wrapCid, sealedShare: payload.sealedShare })),
       );
       this.emit();
