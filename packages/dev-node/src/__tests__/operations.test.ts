@@ -168,4 +168,49 @@ describe("持久化快照与轮转（M4-S13）", () => {
       base = `http://127.0.0.1:${node.port}`;
     }
   });
+
+  it("compact 后旧 .bak 被清理（仅保留最新一个轮转备份）", async () => {
+    const { readdirSync } = await import("node:fs");
+    const bakFiles = () => readdirSync(dataDir).filter((f) => f.startsWith("node-log.jsonl.") && f.endsWith(".bak"));
+
+    // 第一代：2 注册 + 2 设备 = 4 条记录（达到阈值）
+    node = await startDevNode({ persistDir: dataDir, compactThreshold: 4 });
+    base = `http://127.0.0.1:${node.port}`;
+    for (const name of ["bak-u1", "bak-u2"]) {
+      const identity = createIdentity();
+      const record = makeUserNameRecord(identity.ikEd.privateKey, name, identity.did, 0);
+      await fetch(`${base}/v0/registry/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ record: { ...record, signature: Buffer.from(record.signature).toString("base64") } }),
+      });
+      await registerDeviceCert(base, identity, `${name}-dev`);
+    }
+    await node.close();
+
+    // 第二代启动：压缩 → 产生 .bak#1；再写 2 条新注册
+    node = await startDevNode({ persistDir: dataDir, compactThreshold: 4 });
+    base = `http://127.0.0.1:${node.port}`;
+    expect(bakFiles().length).toBe(1);
+    const firstBak = bakFiles()[0]!;
+    for (const name of ["bak-u3", "bak-u4"]) {
+      const identity = createIdentity();
+      const record = makeUserNameRecord(identity.ikEd.privateKey, name, identity.did, 0);
+      await fetch(`${base}/v0/registry/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ record: { ...record, signature: Buffer.from(record.signature).toString("base64") } }),
+      });
+    }
+    await node.close();
+
+    // 第三代启动：再次压缩 → .bak#2 产生，旧 .bak#1 被清理
+    node = await startDevNode({ persistDir: dataDir, compactThreshold: 4 });
+    base = `http://127.0.0.1:${node.port}`;
+    expect(bakFiles().length).toBe(1);
+    expect(bakFiles()[0]).not.toBe(firstBak); // 保留的是最新备份
+    // 数据完好
+    expect((await fetch(`${base}/v0/registry/resolve/bak-u1`)).status).toBe(200);
+    expect((await fetch(`${base}/v0/registry/resolve/bak-u4`)).status).toBe(200);
+  });
 });

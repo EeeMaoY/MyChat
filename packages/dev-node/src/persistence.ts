@@ -13,7 +13,7 @@
  *
  * 追加失败（磁盘问题）：请求仍成功但打印警告（开发节点尽力而为，不因磁盘拒绝服务）。
  */
-import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
+import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
 export type PersistRecord =
@@ -117,22 +117,50 @@ export class FilePersistence implements Persistence {
 
   /**
    * 快照压缩（M4-S13）：等效记录序列写入 snapshot.json（tmp+rename 原子化），
-   * JSONL 轮转为带时间戳的 .bak（保留一份；追加句柄关闭后重开新文件）。
+   * JSONL 轮转为带时间戳的 .bak（追加句柄关闭后重开新文件），并清理旧 .bak 只留最新。
+   *
+   * 失败路径：快照就位后 JSONL 轮转失败（如 Windows 下文件被 AV/编辑器占用）时，
+   * 磁盘留下"新快照 + 未轮转 JSONL"——启动重放已幂等（重复记录去重），该状态无害，
+   * 只警告并留待下次启动重试轮转。
    */
   compact(records: PersistRecord[]): void {
     const tmp = `${this.snapshotPath()}.tmp`;
+    let snapshotOk = false;
     try {
       writeFileSync(tmp, JSON.stringify({ v: 1, savedAt: new Date().toISOString(), records }));
       if (existsSync(this.snapshotPath())) rmSync(this.snapshotPath());
       renameSync(tmp, this.snapshotPath());
+      snapshotOk = true;
       // 关闭当前句柄后轮转 JSONL
       this.close();
       if (existsSync(this.filePath())) {
         renameSync(this.filePath(), join(this.dir, `${FILE_NAME}.${Date.now()}.bak`));
       }
       this.loadCount = records.length;
+      this.pruneRotationBaks();
     } catch (err) {
-      console.warn("[mychat-dev-node] 快照压缩失败（下次启动重试）:", err instanceof Error ? err.message : err);
+      if (snapshotOk) {
+        console.warn(
+          "[mychat-dev-node] JSONL 轮转失败（快照已就位，下次启动将安全重放——重放已幂等，重复记录不会翻倍）:",
+          err instanceof Error ? err.message : err,
+        );
+      } else {
+        console.warn("[mychat-dev-node] 快照压缩失败（下次启动重试）:", err instanceof Error ? err.message : err);
+      }
+    }
+  }
+
+  /** 清理同目录旧轮转备份（node-log.jsonl.*.bak），仅保留最新一个。 */
+  private pruneRotationBaks(): void {
+    try {
+      const baks = readdirSync(this.dir)
+        .filter((f) => f.startsWith(`${FILE_NAME}.`) && f.endsWith(".bak"))
+        .sort(); // 文件名含毫秒时间戳，字典序即时间序
+      for (const stale of baks.slice(0, -1)) {
+        rmSync(join(this.dir, stale), { force: true });
+      }
+    } catch {
+      /* 清理失败不影响主流程 */
     }
   }
 
