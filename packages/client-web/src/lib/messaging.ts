@@ -317,6 +317,7 @@ const sessionKey = (did: string) => `session:${did}`;
 const deviceFpKey = (did: string) => `device-fp:${did}`;
 const msgKey = (did: string, seq: number) => `msg:${did}:${String(seq).padStart(8, "0")}`;
 const cursorKey = (mailboxId: string) => `cursor:${mailboxId}`;
+const groupIdxKey = (groupId: string) => `groupidx:${groupId}`;
 
 interface StoredKeyPair {
   publicKey: string;
@@ -613,6 +614,27 @@ export class Messaging {
       if (!raw) continue;
       try {
         const view = applyGroupKeysPayload(JSON.parse(bytesToUtf8(raw)) as GroupKeysPayload);
+        // 回填序号（修复 3）：GroupKeysPayload 三件套不含 sendIndex/recvIndex，重建后
+        // 不回填则发送序号归零——未重启的对端按防重放闸静默丢弃本端后续全部群消息。
+        // 键缺失/损坏时保持 0/空（向后兼容旧数据）。
+        try {
+          const idxRaw = await this.deps.kv.get(groupIdxKey(view.state.groupId));
+          if (idxRaw) {
+            const idx = JSON.parse(bytesToUtf8(idxRaw)) as { sendIndex?: unknown; recvIndex?: unknown };
+            if (typeof idx.sendIndex === "number" && Number.isInteger(idx.sendIndex) && idx.sendIndex >= 0) {
+              view.sendIndex = idx.sendIndex;
+            }
+            if (Array.isArray(idx.recvIndex)) {
+              for (const entry of idx.recvIndex) {
+                if (Array.isArray(entry) && entry.length === 2 && typeof entry[0] === "string" && typeof entry[1] === "number" && entry[1] >= 0) {
+                  view.recvIndex.set(entry[0], entry[1]);
+                }
+              }
+            }
+          }
+        } catch {
+          /* 序号条目损坏：保持 0/空 */
+        }
         this.groups.set(view.state.groupId, view);
       } catch {
         /* 损坏条目跳过（不阻塞其余群恢复） */
@@ -912,6 +934,19 @@ export class Messaging {
     if (!view) return;
     const payload = makeGroupKeysPayload(view.state, view.groupSecret, view.senderKeys);
     await this.deps.kv.put(`groupview:${groupId}`, utf8ToBytes(JSON.stringify(payload)));
+    await this.persistGroupIndexes(groupId);
+  }
+
+  /**
+   * 群视角序号持久化（groupidx 键）：sendIndex/recvIndex 不在 GroupKeysPayload 三件套内，
+   * 必须单独落盘，否则重启后重建视角时序号归零/清空——发送方序号回退会被未重启对端的
+   * 防重放闸静默丢弃（消息互吞）。收发两侧序号推进处均调用本方法。
+   */
+  private async persistGroupIndexes(groupId: string): Promise<void> {
+    const view = this.groups.get(groupId);
+    if (!view) return;
+    const data = { sendIndex: view.sendIndex, recvIndex: [...view.recvIndex.entries()] };
+    await this.deps.kv.put(groupIdxKey(groupId), utf8ToBytes(JSON.stringify(data)));
   }
 
   /** 发送群文本消息（组内双层信封 → 群信箱）。 */
@@ -971,6 +1006,7 @@ export class Messaging {
       plaintext,
     );
     view.sendIndex = index + 1;
+    await this.persistGroupIndexes(groupId); // 发送序号随每次发送落盘（重启后不归零）
     const mailboxId = groupMailboxId(view.groupSecret, view.state.epoch);
     await this.deps.api.mailboxAppend(mailboxId, this.seal(groupWire, mailboxId));
     // receipt 与 recall 均不落本地消息（recall 的本地占位由 recallMessages 自行标记）
@@ -1021,6 +1057,7 @@ export class Messaging {
       // 本地立即移除（新 epoch 的信箱与密钥本来也拿不到）
       this.groups.delete(groupId);
       await this.deps.kv.delete(`groupview:${groupId}`);
+      await this.deps.kv.delete(groupIdxKey(groupId));
       await this.deps.kv.delete(cursorKey(groupMailboxId(view.groupSecret, view.state.epoch)));
       this.restartRealtime();
       this.emit();
@@ -1068,10 +1105,12 @@ export class Messaging {
       const mailboxId = groupMailboxId(view.groupSecret, view.state.epoch);
       const cursor = await this.cursorFor(mailboxId);
       const { envelopes, cursor: next } = await this.deps.api.mailboxFetch(mailboxId, cursor);
+      let openedAny = false;
       for (const envelope of envelopes) {
         try {
           const groupWire = stripPadding(envelope.payload);
           const opened = openGroupMessage(view, groupWire);
+          openedAny = true;
           // 群内载荷同样出自不可信对端：过同一 parser（形状非法 → null → 丢弃，防渲染期白屏）
           const parsed = parseSessionPayload(bytesToUtf8(opened.plaintext));
           const chatKey = groupChatKey(groupId);
@@ -1089,6 +1128,8 @@ export class Messaging {
           // 外层/内层解密失败、伪造签名、重放：安全丢弃（SR-4）
         }
       }
+      // 本轮成功开启过消息即落盘 recvIndex（openGroupMessage 已推进各发送方的防重放序号）
+      if (openedAny) await this.persistGroupIndexes(groupId);
       await this.advanceCursor(mailboxId, next, envelopes.length > 0);
     }
   }
