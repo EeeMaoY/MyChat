@@ -138,6 +138,8 @@ export interface ChatMessage {
   remoteId?: string;
   /** 已撤回（本地占位保留，内容清除） */
   recalled?: boolean;
+  /** 引用快照（S17：被回复消息摘要，气泡内渲染引用块） */
+  replyTo?: ReplyQuote;
 }
 
 /** 会话键：1:1 = 对方 DID；群组 = group:<groupId>（UI 与消息存储统一路由）。 */
@@ -203,8 +205,18 @@ export interface GroupKeysPayloadJson {
  * 会话明文载荷（M1 计划 §3.1 结构化约定；wire 格式不变，协议规范 §7 不升版）。
  * receipt 的 delivered/read 为对端消息 id 列表（批量合并，MR-1）。
  */
+/** 引用快照（S17）：随消息传输的被回复消息摘要（快照语义——对端撤回不影响引用显示）。 */
+export interface ReplyQuote {
+  /** 被回复消息的发送方 mid（接收方可尝试定位本地对应消息） */
+  mid?: string;
+  /** 被回复者的显示名（发送时快照） */
+  authorName?: string;
+  /** 被回复消息原文（全文传输，渲染截断） */
+  text: string;
+}
+
 type SessionPayload =
-  | { v: 1; type: "chat"; text: string; mid?: string }
+  | { v: 1; type: "chat"; text: string; mid?: string; replyTo?: ReplyQuote }
   | { v: 1; type: "receipt"; delivered: string[]; read: string[] }
   | ({ v: 1; type: "image" | "file"; mid?: string } & AttachmentMeta)
   /** 撤回声明（S16）：ids 为发送方消息 id（mid），接收方按 remoteId 匹配标记已撤回 */
@@ -847,8 +859,8 @@ export class Messaging {
   }
 
   /** 发送群文本消息（组内双层信封 → 群信箱）。 */
-  async sendGroupMessage(groupId: string, text: string): Promise<void> {
-    await this.sendGroupPayload(groupId, { v: 1, type: "chat", text }, "chat", text);
+  async sendGroupMessage(groupId: string, text: string, replyTo?: ReplyQuote): Promise<void> {
+    await this.sendGroupPayload(groupId, { v: 1, type: "chat", text, ...(replyTo ? { replyTo } : {}) }, "chat", text);
   }
 
   /** 发送群附件（随机 CK → CAS 块 → CID/CK 进组内密文，群成员可取）。 */
@@ -1717,11 +1729,11 @@ export class Messaging {
 
   // ----- 发送（FR-5.1 / FR-5.2 / FR-5.3 子集） -----
 
-  async sendMessage(did: string, text: string): Promise<void> {
+  async sendMessage(did: string, text: string, replyTo?: ReplyQuote): Promise<void> {
     await this.ensureSessionFresh(did); // M2-S10：对方设备集变化时先轮换会话
     const session = this.sessions.get(did);
     if (!session) throw new Error("会话不存在（请先添加好友）");
-    await this.sendPayload(session, did, { v: 1, type: "chat", text }, "chat", text);
+    await this.sendPayload(session, did, { v: 1, type: "chat", text, ...(replyTo ? { replyTo } : {}) }, "chat", text);
   }
 
   /**
@@ -2261,6 +2273,7 @@ export class Messaging {
       ...(direction === "in" && payload !== undefined && (payload.type === "chat" || payload.type === "image" || payload.type === "file") && payload.mid !== undefined
         ? { remoteId: payload.mid }
         : {}),
+      ...(payload !== undefined && payload.type === "chat" && payload.replyTo !== undefined ? { replyTo: payload.replyTo } : {}),
       at: Date.now(),
       ...(direction === "out" && kind !== "handshake" ? { status: "sent" as const } : {}),
     };

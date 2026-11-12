@@ -320,3 +320,30 @@ test("消息撤回：A 发送 → A 撤回 → 双方占位显示", async ({ bro
   await expect(alice.getByText("将被撤回的消息")).toHaveCount(0, { timeout: 10_000 });
   await expect(bob.getByText("将被撤回的消息")).toHaveCount(0, { timeout: 10_000 });
 });
+test("引用回复：B 引用 A 的消息回复 → 双方气泡显示引用块", async ({ browser }) => {
+  const alice = await newUser(browser, "e2e_aliceC");
+  const bob = await newUser(browser, "e2e_bobC");
+  await alice.locator(".sidebar").getByRole("button", { name: "➕ 加好友" }).click();
+  await alice.getByPlaceholder("对方的 MyChat 用户名").fill("e2e_bobC");
+  await alice.getByRole("button", { name: "发送好友请求" }).click();
+  await expect(bob.getByText("请求添加你为好友").first()).toBeVisible({ timeout: 15_000 });
+  await bob.getByRole("button", { name: "通过", exact: true }).click();
+
+  // A 发原始消息
+  await alice.locator("textarea.chat-textarea").fill("原始问题消息");
+  await alice.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(bob.getByText("原始问题消息").first()).toBeVisible({ timeout: 15_000 });
+
+  // B 引用回复（消息行 hover → 回复按钮 → 预览条 → 发送）
+  const bobRow = bob.locator(".msg-row").filter({ hasText: "原始问题消息" });
+  await bobRow.getByRole("button", { name: "回复", exact: true }).click();
+  await expect(bob.locator(".reply-preview").filter({ hasText: "原始问题消息" })).toBeVisible({ timeout: 10_000 });
+  await bob.locator("textarea.chat-textarea").fill("这是引用回复");
+  await bob.getByRole("button", { name: "发送", exact: true }).click();
+
+  // 双方气泡显示引用块（作者 + 原文摘要）与回复内容
+  await expect(bob.getByText("这是引用回复").first()).toBeVisible({ timeout: 15_000 });
+  await expect(bob.locator(".quote-block").filter({ hasText: "原始问题消息" })).toBeVisible({ timeout: 10_000 });
+  await expect(alice.getByText("这是引用回复").first()).toBeVisible({ timeout: 20_000 });
+  await expect(alice.locator(".quote-block").filter({ hasText: "原始问题消息" })).toBeVisible({ timeout: 10_000 });
+});

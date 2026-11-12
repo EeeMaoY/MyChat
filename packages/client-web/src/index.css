@@ -678,6 +678,52 @@ textarea {
   margin-top: 2px;
 }
 
+/* 引用回复（S17）：气泡内引用块 + 输入预览条 */
+.chat-bubble-in.with-quote,
+.chat-bubble-out.with-quote {
+  border-left: 3px solid var(--primary, #4f8cff);
+}
+
+.quote-block {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 4px 8px;
+  margin-bottom: 4px;
+  border-left: 2px solid var(--primary, #4f8cff);
+  background: rgba(79, 140, 255, 0.08);
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.quote-block .quote-author {
+  color: var(--primary, #4f8cff);
+  font-weight: 600;
+}
+
+.quote-block .quote-text {
+  color: var(--text-dim, #9aa0a6);
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+
+.reply-preview {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 8px 14px;
+  border-top: 1px solid var(--border, #262d3a);
+  font-size: 13px;
+  color: var(--text-dim, #9aa0a6);
+}
+
+.reply-preview-text {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* 撤回消息占位气泡（S16）与行内撤回按钮 */
 .recalled-bubble {
   font-style: italic;

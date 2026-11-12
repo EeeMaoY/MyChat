@@ -33,6 +33,11 @@ const ATTACHMENT_MAX_BYTES = 8 * 1024 * 1024;
 /** 文件选择框 accept 提示（不强制；其余类型按文件消息发送）。 */
 const ATTACHMENT_ACCEPT = "image/*,.pdf,.txt,.md,.zip,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.mp3,.mp4";
 
+/** 引用摘要渲染截断（S17：全文随消息传输，UI 截断显示）。 */
+function truncateQuote(text: string): string {
+  return text.length > 60 ? `${text.slice(0, 60)}…` : text;
+}
+
 /** 回执 title 提示（FR-5.2 三态）。 */
 const RECEIPT_TITLE = { sent: "已发送", delivered: "已送达", read: "已读" } as const;
 
@@ -71,6 +76,8 @@ export default function ChatPanel({ onBack, onAddFriend, onOpenMembers }: Props)
   /** 退群两段式确认（与设备吊销同模式）。 */
   const [leaveTarget, setLeaveTarget] = useState<string | null>(null);
   const [leavePending, setLeavePending] = useState(false);
+  /** 引用回复目标（S17：预览条 + 发送随消息传输）。 */
+  const [replyTarget, setReplyTarget] = useState<{ mid?: string; authorName: string; text: string } | null>(null);
 
   const list = did !== null ? state.messages[did] : undefined;
   const contact = did !== null ? state.contacts.find((c) => c.did === did) : undefined;
@@ -159,11 +166,12 @@ export default function ChatPanel({ onBack, onAddFriend, onOpenMembers }: Props)
 
   async function handleSend(): Promise<void> {
     const text = draft.trim();
-    if (text === "" || sending) return;
+    if (text === "" || sending || activeDid === null) return;
     setSending(true);
     try {
-      await sendMessage(activeDid, text);
+      await sendMessage(activeDid, text, replyTarget ?? undefined);
       setDraft("");
+      setReplyTarget(null);
       if (inputRef.current !== null) inputRef.current.style.height = "auto";
     } catch (err) {
       setNotice(err instanceof Error ? err.message : "发送失败");
@@ -212,6 +220,20 @@ export default function ChatPanel({ onBack, onAddFriend, onOpenMembers }: Props)
   function renderBody(m: ChatMessage, dir: "in" | "out"): ReactElement {
     if (m.recalled === true) {
       return <div className={`chat-bubble-${dir} recalled-bubble`}>此消息已撤回</div>;
+    }
+    const bubbleClass = `${`chat-bubble-${dir}`}${m.replyTo !== undefined ? " with-quote" : ""}`;
+    if (m.kind === "chat") {
+      return (
+        <div className={bubbleClass}>
+          {m.replyTo !== undefined && (
+            <div className="quote-block">
+              <span className="quote-author">{m.replyTo.authorName ?? "消息"}</span>
+              <span className="quote-text">{truncateQuote(m.replyTo.text)}</span>
+            </div>
+          )}
+          {m.text}
+        </div>
+      );
     }
     if (m.kind === "image" && m.attachment !== undefined) {
       return (
@@ -334,6 +356,26 @@ export default function ChatPanel({ onBack, onAddFriend, onOpenMembers }: Props)
               <span className="msg-meta">
                 <span className="msg-time">{formatClock(m.at)}</span>
                 {m.direction === "out" && <ReceiptBadge status={m.status} />}
+                {m.recalled !== true && m.kind === "chat" && (
+                  <button
+                    className="msg-recall"
+                    title="回复此消息"
+                    onClick={() =>
+                      setReplyTarget({
+                        mid: m.remoteId ?? m.id,
+                        authorName:
+                          m.direction === "out"
+                            ? (state.myName ?? "我")
+                            : (state.contacts.find((c) => c.did === m.senderDid)?.name ??
+                              state.contacts.find((c) => c.did === m.did)?.name ??
+                              shortDid(m.senderDid ?? m.did)),
+                        text: m.text,
+                      })
+                    }
+                  >
+                    回复
+                  </button>
+                )}
                 {m.direction === "out" && m.recalled !== true && m.kind === "chat" && (
                   <button
                     className="msg-recall"
@@ -349,6 +391,16 @@ export default function ChatPanel({ onBack, onAddFriend, onOpenMembers }: Props)
         })}
       </div>
 
+      {replyTarget !== null && (
+        <div className="reply-preview">
+          <span className="reply-preview-text">
+            回复 <b>{replyTarget.authorName}</b>：{truncateQuote(replyTarget.text)}
+          </span>
+          <button className="btn-ghost" onClick={() => setReplyTarget(null)} aria-label="取消引用">
+            ✕
+          </button>
+        </div>
+      )}
       <footer className="chat-input">
         {/* 隐藏文件选择框：选中即发送 */}
         <input

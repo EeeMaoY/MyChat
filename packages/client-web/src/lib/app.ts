@@ -274,10 +274,10 @@ export async function addFriend(name: string, note: string): Promise<string | nu
   return error;
 }
 
-/** 发送消息（1:1 与群统一入口；群会话键 group:<groupId>，M3-S11）。 */
-export async function sendMessage(did: string, text: string): Promise<void> {
-  if (did.startsWith("group:")) await messaging?.sendGroupMessage(did.slice("group:".length), text);
-  else await messaging?.sendMessage(did, text);
+/** 发送消息（1:1 与群统一入口；群会话键 group:<groupId>，M3-S11；replyTo 引用快照 S17）。 */
+export async function sendMessage(did: string, text: string, replyTo?: { mid?: string; authorName?: string; text: string }): Promise<void> {
+  if (did.startsWith("group:")) await messaging?.sendGroupMessage(did.slice("group:".length), text, replyTo);
+  else await messaging?.sendMessage(did, text, replyTo);
 }
 
 /** 发送图片/文件（≤8MB，端到端加密后走 CAS 块；群附件 CID/CK 进组内密文）。 */
