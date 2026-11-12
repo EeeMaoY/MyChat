@@ -379,6 +379,13 @@ export class Messaging {
     const m = new Messaging(deps);
     m.identity = deserializeIdentity(bytesToUtf8(identityJson));
     await m.loadKeyMaterial();
+    // 恢复自愈：社交恢复流程只回写 identity + my-name，SPK/OPK 缺失的"半死"账户
+    // 会让新好友握手 TypeError 被吞、exportAll 抛错、reconcileWithNode 跳过 bundle 上传。
+    // 此处复用 createNew 的生成路径补齐并落盘，随后 reconcile 的既有条件自然通过并上传 bundle
+    // （恢复完成页的"创建托管备份"也依赖 exportAll 可用）。
+    if (m.spk === undefined || m.opk === undefined) {
+      await m.initPreKeyMaterial();
+    }
     await m.loadSocialState();
     await m.ensureDevice();
     await m.ensureMomentKey();
@@ -391,20 +398,24 @@ export class Messaging {
     const m = new Messaging(deps);
     m.identity = createIdentity();
     await deps.kv.put(K_IDENTITY, utf8ToBytes(serializeIdentity(m.identity)));
-    // 预密钥材料（M2-S9：SPK + OPK 池）
-    m.spk = generateX25519KeyPair();
-    const opk = generateX25519KeyPair();
-    m.opk = { ...opk, id: deriveOpkId(opk.publicKey) };
-    m.opkPool = new Map([[m.opk.id, { publicKey: opk.publicKey, privateKey: opk.privateKey }]]);
-    for (let i = 1; i < OPK_POOL_TARGET; i++) {
-      const k = generateX25519KeyPair();
-      m.opkPool.set(deriveOpkId(k.publicKey), k);
-    }
-    await deps.kv.put(K_SPK, utf8ToBytes(JSON.stringify(kpToJson(m.spk))));
-    await deps.kv.put(K_OPK, utf8ToBytes(JSON.stringify({ id: m.opk.id, ...kpToJson(opk) })));
-    await m.persistOpkPool();
+    await m.initPreKeyMaterial();
     await m.ensureDevice();
     return m;
+  }
+
+  /** 预密钥材料生成并持久化（M2-S9：SPK + OPK + 池；createNew 与恢复自愈共用）。 */
+  private async initPreKeyMaterial(): Promise<void> {
+    this.spk = generateX25519KeyPair();
+    const opk = generateX25519KeyPair();
+    this.opk = { ...opk, id: deriveOpkId(opk.publicKey) };
+    this.opkPool = new Map([[this.opk.id, { publicKey: opk.publicKey, privateKey: opk.privateKey }]]);
+    for (let i = 1; i < OPK_POOL_TARGET; i++) {
+      const k = generateX25519KeyPair();
+      this.opkPool.set(deriveOpkId(k.publicKey), k);
+    }
+    await this.deps.kv.put(K_SPK, utf8ToBytes(JSON.stringify(kpToJson(this.spk))));
+    await this.deps.kv.put(K_OPK, utf8ToBytes(JSON.stringify({ id: this.opk.id, ...kpToJson(opk) })));
+    await this.persistOpkPool();
   }
 
   // ----- 本机设备（M2-S10 FR-1.4） -----
