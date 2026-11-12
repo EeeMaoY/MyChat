@@ -1,6 +1,7 @@
 /**
  * 守护者侧恢复请求横幅（FR-1.3）：每 3s 轮询待确认恢复请求与我持有的守护身份。
- * 有请求时顶部显著横幅 + 确认/拒绝（UX-2 防社工：确认前醒目警示）；新增守护身份一次性 notice。
+ * 有请求时顶部显著横幅 + 确认/拒绝（UX-2 防社工：确认前醒目警示，分别展示请求者与被恢复账户）；
+ * 仅展示本地确持有其守护分片的账户的请求；新增守护身份一次性 notice。
  */
 import { useEffect, useRef, useState } from "react";
 
@@ -39,7 +40,10 @@ export default function RecoveryRequestBanner() {
     async function tick(): Promise<void> {
       const [reqs, ships] = await Promise.all([listRecoveryRequests(), listGuardianships()]);
       if (!alive) return;
-      setRequests(reqs);
+      // 守护关系前置校验：ownerDid 为请求方自报，仅展示本地确持有其守护分片的账户的恢复请求；
+      // 无守护关系的请求直接过滤，不提供"确认协助"入口
+      const guardedOwners = new Set(ships.map((s) => s.ownerDid));
+      setRequests(reqs.filter((r) => guardedOwners.has(r.ownerDid)));
       const seen = seenGuardiansRef.current;
       if (seen === null) {
         seenGuardiansRef.current = new Set(ships.map((s) => s.ownerDid));
@@ -101,10 +105,13 @@ export default function RecoveryRequestBanner() {
       <div className="recovery-banner-body">
         {requests.map((req) => {
           const label = state.contacts.find((c) => c.did === req.fromDid)?.name ?? shortDid(req.fromDid);
+          // 被恢复账户与请求者是两个身份：必须分别展示，否则守护者会把第三方账户的分片误发给请求者
+          const ownerLabel = state.contacts.find((c) => c.did === req.ownerDid)?.name ?? shortDid(req.ownerDid);
           return (
             <div key={req.fromDid} className="recovery-banner-row">
               <p className="recovery-banner-text">
-                <b>{label}</b>（<code>{shortDid(req.fromDid)}</code>）请求恢复其账户——请确认对方确为本人，且你本人的设备未丢失。
+                <b>{label}</b>（<code>{shortDid(req.fromDid)}</code>）请求恢复账户 <b>{ownerLabel}</b>
+                ——请分别确认：请求者确为该账户本人、且你的设备未丢失。
               </p>
               <div className="recovery-banner-actions">
                 <button className="btn-primary" disabled={busyFrom !== null} onClick={() => void handleConfirm(req)}>
