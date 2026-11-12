@@ -12,13 +12,15 @@ import {
   type KeyPair,
   generateX25519KeyPair,
   hkdfSha256,
+  x25519PublicKeyFromPrivate,
 } from "../crypto/index.ts";
-import { base58Decode, base58Encode, concatBytes, utf8ToBytes } from "../codec/index.ts";
+import { base58Decode, base58Encode, bytesEqual, concatBytes, utf8ToBytes } from "../codec/index.ts";
 import type { Identity, PreKeyBundle } from "../identity/index.ts";
 import { verifyPreKeyBundle } from "../identity/index.ts";
 import { deriveSessionMailbox } from "../envelope/index.ts";
 import {
   type RatchetState,
+  parseSkippedKeyId,
   ratchetDecrypt,
   ratchetEncrypt,
   ratchetInitInitiator,
@@ -160,28 +162,83 @@ export function serializeSession(session: Session): string {
   });
 }
 
+/** 校验 base58 字段解码后为 32B 密钥（防篡改记录以错误长度密钥进入运行时）。 */
+function decodeKey58(value: unknown, field: string): Uint8Array {
+  if (typeof value !== "string") throw new Error(`session: 字段 ${field} 缺失或类型非法`);
+  const bytes = base58Decode(value);
+  if (bytes.length !== 32) throw new Error(`session: 字段 ${field} 解码后须为 32 字节（实为 ${bytes.length}）`);
+  return bytes;
+}
+
+function decodeKey58Nullable(value: unknown, field: string): Uint8Array | null {
+  return value === null ? null : decodeKey58(value, field);
+}
+
+/** 校验计数器字段为非负安全整数。 */
+function readCount(value: unknown, field: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`session: 字段 ${field} 须为非负安全整数`);
+  }
+  return value;
+}
+
+/**
+ * 反序列化会话：逐字段校验（与 deserializeIdentity 同级防线）——密钥字段
+ * base58 解码后须为 32B、计数器须为非负安全整数、skipped 条目结构完整
+ * （dh 32B + 非负序号 + key 32B）、dhSelf 公钥可由私钥推导比对（X25519
+ * 自洽不变量）。任何字段被篡改即 throw，拒绝进入运行时。
+ */
 export function deserializeSession(json: string): Session {
-  const raw = JSON.parse(json) as SerializedSession;
-  if (typeof raw !== "object" || raw === null) throw new Error("session: 序列化数据非法");
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(json);
+  } catch {
+    throw new Error("session: 序列化数据不是合法 JSON");
+  }
+  if (typeof parsed !== "object" || parsed === null) throw new Error("session: 序列化数据非法");
+  const raw = parsed as Partial<SerializedSession>;
+  if (raw.role !== "initiator" && raw.role !== "responder") {
+    throw new Error(`session: 字段 role 非法（${String(raw.role)}）`);
+  }
+  if (raw.peerDid !== null && typeof raw.peerDid !== "string") {
+    throw new Error("session: 字段 peerDid 须为字符串或 null");
+  }
+
+  const rt = raw.ratchet;
+  if (typeof rt !== "object" || rt === null) throw new Error("session: 字段 ratchet 缺失或非法");
+  const dhSelfPriv = decodeKey58(rt.dhSelfPriv, "ratchet.dhSelfPriv");
+  const dhSelfPub = decodeKey58(rt.dhSelfPub, "ratchet.dhSelfPub");
+  if (!bytesEqual(x25519PublicKeyFromPrivate(dhSelfPriv), dhSelfPub)) {
+    throw new Error("session: 字段 ratchet.dhSelfPub 与私钥推导不一致");
+  }
+
+  if (!Array.isArray(rt.skipped)) throw new Error("session: 字段 ratchet.skipped 须为数组");
+  const skipped = new Map<string, Uint8Array>();
+  for (const item of rt.skipped) {
+    if (!Array.isArray(item) || item.length !== 2 || typeof item[0] !== "string" || typeof item[1] !== "string") {
+      throw new Error("session: skipped 条目须为 [键 id, base58 密钥] 二元组");
+    }
+    const { dh } = parseSkippedKeyId(item[0]); // 键 id 格式与序号合法性在此校验
+    if (dh.length !== 32) throw new Error("session: skipped 条目 dh 须为 32 字节");
+    skipped.set(item[0], decodeKey58(item[1], "ratchet.skipped[].key"));
+  }
+
   return {
     role: raw.role,
     peerDid: raw.peerDid,
-    selfIkxPublic: base58Decode(raw.selfIkx),
-    peerIkxPublic: base58Decode(raw.peerIkx),
-    mailboxSecret: base58Decode(raw.mailboxSecret),
+    selfIkxPublic: decodeKey58(raw.selfIkx, "selfIkx"),
+    peerIkxPublic: decodeKey58(raw.peerIkx, "peerIkx"),
+    mailboxSecret: decodeKey58(raw.mailboxSecret, "mailboxSecret"),
     ratchet: {
-      rootKey: base58Decode(raw.ratchet.rootKey),
-      dhSelf: {
-        publicKey: base58Decode(raw.ratchet.dhSelfPub),
-        privateKey: base58Decode(raw.ratchet.dhSelfPriv),
-      },
-      dhRemote: raw.ratchet.dhRemote === null ? null : base58Decode(raw.ratchet.dhRemote),
-      sendChainKey: raw.ratchet.sendChainKey === null ? null : base58Decode(raw.ratchet.sendChainKey),
-      recvChainKey: raw.ratchet.recvChainKey === null ? null : base58Decode(raw.ratchet.recvChainKey),
-      sendCount: raw.ratchet.sendCount,
-      recvCount: raw.ratchet.recvCount,
-      prevSendCount: raw.ratchet.prevSendCount,
-      skipped: new Map(raw.ratchet.skipped.map(([k, v]) => [k, base58Decode(v)])),
+      rootKey: decodeKey58(rt.rootKey, "ratchet.rootKey"),
+      dhSelf: { publicKey: dhSelfPub, privateKey: dhSelfPriv },
+      dhRemote: decodeKey58Nullable(rt.dhRemote, "ratchet.dhRemote"),
+      sendChainKey: decodeKey58Nullable(rt.sendChainKey, "ratchet.sendChainKey"),
+      recvChainKey: decodeKey58Nullable(rt.recvChainKey, "ratchet.recvChainKey"),
+      sendCount: readCount(rt.sendCount, "ratchet.sendCount"),
+      recvCount: readCount(rt.recvCount, "ratchet.recvCount"),
+      prevSendCount: readCount(rt.prevSendCount, "ratchet.prevSendCount"),
+      skipped,
     },
   };
 }

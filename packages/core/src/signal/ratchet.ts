@@ -19,7 +19,7 @@ import {
   randomBytes,
   x25519SharedSecret,
 } from "../crypto/index.ts";
-import { base58Encode, concatBytes } from "../codec/index.ts";
+import { base58Decode, base58Encode, concatBytes } from "../codec/index.ts";
 
 const ROOT_INFO = "mychat:dr:rk:v1";
 const CHAIN_INFO = "mychat:dr:ck:v1";
@@ -69,6 +69,19 @@ function kdfChainKey(chainKey: Uint8Array): { chainKey: Uint8Array; messageKey: 
 
 function skippedKey(dh: Uint8Array, n: number): string {
   return `${base58Encode(dh)}:${n}`;
+}
+
+/**
+ * 解析 skipped 键 id（与 skippedKey 同格式：base58(dh) + ":" + n）。
+ * 导出供持久化层反序列化时校验；格式非法（缺分隔符/序号非十进制非负整数）
+ * 或 dh 非 base58 合法编码时 throw。
+ */
+export function parseSkippedKeyId(key: string): { dh: Uint8Array; n: number } {
+  const sep = key.lastIndexOf(":");
+  if (sep <= 0) throw new Error("ratchet: skipped 键 id 缺少分隔符");
+  const nText = key.slice(sep + 1);
+  if (!/^(0|[1-9]\d*)$/.test(nText)) throw new Error("ratchet: skipped 键 id 序号非法");
+  return { dh: base58Decode(key.slice(0, sep)), n: Number(nText) };
 }
 
 /**
