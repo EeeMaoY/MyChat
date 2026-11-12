@@ -172,21 +172,47 @@ function replayPersisted(state: NodeState, records: PersistRecord[]): void {
 
 /**
  * 当前内存态反推为等效记录序列（M4-S13 快照压缩）：重放逻辑复用，单一事实形态。
- * 已知边界：手动 POST /v0/kt/append 的事件不进快照（自动锚定的 register/device
- * 事件随记录重建；KT 根链由重放按序重建）。
+ *
+ * KT 相关记录（register/device-add/device-revoke/kt-manual）按 ktlog.events 原始
+ * 顺序导出（含手动 POST /v0/kt/append 的事件）：重放按同序重建叶层，Merkle 根链
+ * 跨压缩不漂移——若按类型分组导出，叶序与原始日志不同，客户端按旧根/ktIndex 取证失配。
+ * 其余（bundles/opks/blocks/envelopes/recovery）与 KT 根链无关，按 store 遍历序导出。
  */
 function exportStateAsRecords(state: NodeState): PersistRecord[] {
   const out: PersistRecord[] = [];
-  for (const record of state.registry.records.values()) {
-    out.push({ t: "register", record: serializeRecord(record) });
-  }
-  for (const [did, entries] of state.devices.devices) {
-    for (const entry of entries.values()) {
-      out.push({ t: "device-add", did, json: entry.certificate });
-      if (entry.revokedAt !== null && entry.revokedJson !== undefined) {
-        const revoked = JSON.parse(entry.certificate) as { dkId: string };
-        out.push({ t: "device-revoke", did, dkId: revoked.dkId, json: entry.revokedJson });
+  for (const event of state.ktlog.events) {
+    if (state.ktlog.manualIndices.has(event.index)) {
+      out.push({ t: "kt-manual", did: event.did, type: event.type, payload: Buffer.from(event.payload).toString("base64") });
+      continue;
+    }
+    switch (event.type) {
+      case "register": {
+        // register 事件 payload 即用户名（utf8），回查 registry 取完整记录
+        const record = state.registry.records.get(Buffer.from(event.payload).toString("utf8"));
+        if (record === undefined) break; // 理论不可达（注册即锚定）；防御性跳过
+        out.push({ t: "register", record: serializeRecord(record) });
+        break;
       }
+      case "device-add": {
+        // device-add 事件 payload 即凭证 JSON 原文
+        out.push({ t: "device-add", did: event.did, json: Buffer.from(event.payload).toString("utf8") });
+        break;
+      }
+      case "device-revoke": {
+        // device-revoke 事件 payload 即吊销 JSON（解析取 dkId）
+        const json = Buffer.from(event.payload).toString("utf8");
+        let dkId: string;
+        try {
+          dkId = (JSON.parse(json) as { dkId?: unknown }).dkId as string;
+        } catch {
+          break; // 理论不可达；防御性跳过
+        }
+        if (typeof dkId !== "string") break;
+        out.push({ t: "device-revoke", did: event.did, dkId, json });
+        break;
+      }
+      default:
+        break;
     }
   }
   for (const [did, byDevice] of state.bundles.bundles) {
@@ -209,10 +235,6 @@ function exportStateAsRecords(state: NodeState): PersistRecord[] {
   }
   for (const [did, json] of state.recovery) {
     out.push({ t: "recovery", did, json });
-  }
-  for (const index of [...state.ktlog.manualIndices].sort((a, b) => a - b)) {
-    const event = state.ktlog.events[index]!;
-    out.push({ t: "kt-manual", did: event.did, type: event.type, payload: Buffer.from(event.payload).toString("base64") });
   }
   return out;
 }

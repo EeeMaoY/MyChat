@@ -13,10 +13,14 @@ import {
   encodePreKeyBundle,
   generateX25519KeyPair,
   issuePreKeyBundle,
+  ktVerifyInclusion,
   makeEnvelope,
   makeUserNameRecord,
   randomBytes,
+  utf8ToBytes,
   type Envelope,
+  type KTEvent,
+  type KtInclusionProof,
 } from "@mychat/core";
 import { envelopeToJson } from "../wire";
 
@@ -212,5 +216,64 @@ describe("持久化快照与轮转（M4-S13）", () => {
     // 数据完好
     expect((await fetch(`${base}/v0/registry/resolve/bak-u1`)).status).toBe(200);
     expect((await fetch(`${base}/v0/registry/resolve/bak-u4`)).status).toBe(200);
+  });
+
+  it("交错注册/设备/手动事件后压缩：KT 根链不漂移，ktIndex/proof 仍可取证", async () => {
+    // 第一代（不压缩）：交错操作制造与"按类型分组导出"不同的叶序
+    node = await startDevNode({ persistDir: dataDir });
+    base = `http://127.0.0.1:${node.port}`;
+    const reg = async (name: string) => {
+      const identity = createIdentity();
+      const record = makeUserNameRecord(identity.ikEd.privateKey, name, identity.did, 0);
+      const res = await fetch(`${base}/v0/registry/register`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ record: { ...record, signature: Buffer.from(record.signature).toString("base64") } }),
+      });
+      expect(res.status).toBe(201);
+      return identity;
+    };
+    const alice = await reg("ord-alice"); // KT #0
+    const bob = await reg("ord-bob"); // #1
+    await registerDeviceCert(base, alice, "A1"); // #2
+    const carol = await reg("ord-carol"); // #3
+    await registerDeviceCert(base, bob, "B1"); // #4
+    await registerDeviceCert(base, alice, "A2"); // #5
+    // 手动 KT 事件（POST /v0/kt/append，同样须保序进快照）
+    const manual = await fetch(`${base}/v0/kt/append`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ did: alice.did, type: "revoke", payload: Buffer.from("manual-note", "utf8").toString("base64") }),
+    });
+    expect(manual.status).toBe(201);
+    const oldRoot = (await (await fetch(`${base}/v0/kt/root`)).json()) as { root: string; size: number };
+    expect(oldRoot.size).toBe(7);
+    await node.close();
+
+    // 第二代：小阈值触发压缩（内存态由原始 JSONL 重放，此代根必然一致）
+    node = await startDevNode({ persistDir: dataDir, compactThreshold: 5 });
+    base = `http://127.0.0.1:${node.port}`;
+    await node.close();
+
+    // 第三代：从压缩快照重放——导出保序是根链不漂移的关键（分组导出会使叶序漂移）
+    node = await startDevNode({ persistDir: dataDir, compactThreshold: 5 });
+    base = `http://127.0.0.1:${node.port}`;
+    const newRoot = (await (await fetch(`${base}/v0/kt/root`)).json()) as { root: string; size: number };
+    expect(newRoot.root).toBe(oldRoot.root);
+    expect(newRoot.size).toBe(7);
+
+    // resolve 返回的 ktIndex 取包含性证明仍有效（客户端取证路径）
+    const resolved = (await (await fetch(`${base}/v0/registry/resolve/ord-alice`)).json()) as {
+      record: { ktIndex: number; did: string };
+    };
+    expect(resolved.record.ktIndex).toBe(0);
+    const { proof } = (await (await fetch(`${base}/v0/kt/proof/${resolved.record.ktIndex}`)).json()) as { proof: KtInclusionProof };
+    const event: KTEvent = { did: resolved.record.did, type: "register", index: resolved.record.ktIndex, payload: utf8ToBytes("ord-alice") };
+    expect(ktVerifyInclusion(event, proof, newRoot.root)).toBe(true);
+    // 手动事件的证明同样有效
+    const manualProof = (await (await fetch(`${base}/v0/kt/proof/6`)).json()) as { proof: KtInclusionProof };
+    expect(
+      ktVerifyInclusion({ did: alice.did, type: "revoke", index: 6, payload: utf8ToBytes("manual-note") }, manualProof.proof, newRoot.root),
+    ).toBe(true);
   });
 });
