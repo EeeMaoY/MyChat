@@ -5,7 +5,8 @@ coverage/
 *.tsbuildinfo
 .DS_Store
 
-# Playwright 产物（M4-S14）
+# Playwright 产物（M4-S14；根级 playwright.config 的输出在仓库根）
 packages/client-web/test-results/
 packages/client-web/playwright-report/
+test-results/
 .tmp-build/
