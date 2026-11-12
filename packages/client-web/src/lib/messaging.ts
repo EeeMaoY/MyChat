@@ -950,9 +950,13 @@ export class Messaging {
     if (!view) throw new Error("群不存在");
     const mySk = view.senderKeys.get(this.identity.did);
     if (!mySk) throw new Error("缺少本群发送密钥（等待群主重新分发）");
-    // 群内容消息同样注入 mid（撤回定位，S16）
+    // 群内容消息同样注入 mid（撤回定位，S16）；本地入库 id 同步以 mid 命名（idOverride），
+    // 与 1:1 sendPayload 同构——否则发送方本地 id（m<seq>）与对端 remoteId（mid）永不相等，
+    // 群撤回声明与回执均无法按 id 匹配。
+    let mid: string | undefined;
     if (payload.type === "chat" || payload.type === "image" || payload.type === "file") {
-      (payload as { mid?: string }).mid = `mid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      mid = `mid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      (payload as { mid?: string }).mid = mid;
     }
     const index = view.sendIndex;
     const plaintext = utf8ToBytes(JSON.stringify(payload));
@@ -969,8 +973,9 @@ export class Messaging {
     view.sendIndex = index + 1;
     const mailboxId = groupMailboxId(view.groupSecret, view.state.epoch);
     await this.deps.api.mailboxAppend(mailboxId, this.seal(groupWire, mailboxId));
-    if (payload.type !== "receipt") {
-      await this.appendLocalMessage(groupChatKey(groupId), "out", text, kind, payload);
+    // receipt 与 recall 均不落本地消息（recall 的本地占位由 recallMessages 自行标记）
+    if (payload.type !== "receipt" && payload.type !== "recall") {
+      await this.appendLocalMessage(groupChatKey(groupId), "out", text, kind, payload, undefined, mid);
     }
     this.emit();
   }
@@ -2223,12 +2228,17 @@ export class Messaging {
 
   /**
    * 撤回自己发送的消息（S16）：本地标记 recalled（占位保留）+ 发 recall 声明，
-   * 对端按 remoteId 匹配标记。ids = 本地 out 消息 id（发送时即 mid，见 sendPayload）。
+   * 对端按 remoteId 匹配标记。ids = 本地 out 消息 id（发送时即 mid，见 sendPayload/sendGroupPayload）。
+   * 群撤回走群信箱分发（群会话键 group:<groupId> 不在 1:1 sessions 中，不可套用 1:1 路径）；
+   * 自己撤回时的本地标记在群/1:1 两侧共用同一 out 分支（id 已 == mid）。
    */
   async recallMessages(chatKey: string, ids: string[]): Promise<void> {
-    const isGroup = chatKey.startsWith("group:");
-    const session = isGroup ? this.sessions.get(chatKey.slice("group:".length)) : this.sessions.get(chatKey);
-    if (!session) throw new Error("会话不存在");
+    const groupId = chatKey.startsWith("group:") ? chatKey.slice("group:".length) : null;
+    if (groupId !== null) {
+      if (!this.groups.has(groupId)) throw new Error("群不存在");
+    } else if (!this.sessions.get(chatKey)) {
+      throw new Error("会话不存在");
+    }
     const list = this.messages.get(chatKey) ?? [];
     const idSet = new Set(ids);
     let changed = false;
@@ -2242,9 +2252,15 @@ export class Messaging {
       }
     }
     if (!changed) return;
-    const wire = sessionSend(session, utf8ToBytes(JSON.stringify({ v: 1, type: "recall", ids } satisfies SessionPayload)));
-    const mailboxId = sessionMailbox(session, "send", Date.now());
-    await this.deps.api.mailboxAppend(mailboxId, this.seal(wire, mailboxId));
+    if (groupId !== null) {
+      // recall 经 sendGroupPayload 只发声明不落本地消息（见其内注释）
+      await this.sendGroupPayload(groupId, { v: 1, type: "recall", ids } satisfies SessionPayload, "chat", "");
+    } else {
+      const session = this.sessions.get(chatKey)!;
+      const wire = sessionSend(session, utf8ToBytes(JSON.stringify({ v: 1, type: "recall", ids } satisfies SessionPayload)));
+      const mailboxId = sessionMailbox(session, "send", Date.now());
+      await this.deps.api.mailboxAppend(mailboxId, this.seal(wire, mailboxId));
+    }
     this.emit();
   }
 
