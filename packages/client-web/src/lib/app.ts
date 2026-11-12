@@ -352,6 +352,12 @@ export async function resetMomentCircle(): Promise<void> {
 }
 
 /** 评论好友动态（v1 仅作者可见）。 */
+/** 撤回自己发送的消息（S16）：本地占位 + 对端同步占位。 */
+export async function recallMessage(chatKey: string, ids: string[]): Promise<void> {
+  if (!messaging) throw new Error("应用尚未就绪");
+  await messaging.recallMessages(chatKey, ids);
+}
+
 export async function commentMoment(authorDid: string, cid: string, text: string): Promise<void> {
   if (!messaging) throw new Error("应用尚未就绪");
   await messaging.commentMoment(authorDid, cid, text);

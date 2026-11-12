@@ -678,6 +678,29 @@ textarea {
   margin-top: 2px;
 }
 
+/* 撤回消息占位气泡（S16）与行内撤回按钮 */
+.recalled-bubble {
+  font-style: italic;
+  color: var(--text-dim, #9aa0a6);
+  background: transparent !important;
+  border: 1px dashed var(--border, #262d3a);
+}
+
+.msg-recall {
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--text-dim, #9aa0a6);
+  background: none;
+  border: none;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s;
+}
+
+.msg-row:hover .msg-recall {
+  opacity: 1;
+}
+
 /* 群消息署名（M3-S11）：in 气泡上方的发送者名 */
 .msg-sender {
   display: block;

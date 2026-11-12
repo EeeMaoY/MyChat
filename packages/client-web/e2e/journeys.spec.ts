@@ -297,3 +297,26 @@ test("群成员面板：查看成员 → 移除成员（面板化操作替代 pr
   await expect(alice.getByText("2 位成员").first()).toBeVisible({ timeout: 20_000 });
   await expect(alice.locator(".guardian-item").filter({ hasText: "e2e_bobA" })).toHaveCount(0, { timeout: 10_000 });
 });
+test("消息撤回：A 发送 → A 撤回 → 双方占位显示", async ({ browser }) => {
+  const alice = await newUser(browser, "e2e_aliceB");
+  const bob = await newUser(browser, "e2e_bobB");
+  await alice.locator(".sidebar").getByRole("button", { name: "➕ 加好友" }).click();
+  await alice.getByPlaceholder("对方的 MyChat 用户名").fill("e2e_bobB");
+  await alice.getByRole("button", { name: "发送好友请求" }).click();
+  await expect(bob.getByText("请求添加你为好友").first()).toBeVisible({ timeout: 15_000 });
+  await bob.getByRole("button", { name: "通过", exact: true }).click();
+
+  // A 发消息
+  await alice.locator("textarea.chat-textarea").fill("将被撤回的消息");
+  await alice.getByRole("button", { name: "发送", exact: true }).click();
+  await expect(bob.getByText("将被撤回的消息").first()).toBeVisible({ timeout: 15_000 });
+
+  // A 撤回（hover 撤回按钮）
+  await alice.getByRole("button", { name: "撤回", exact: true }).click();
+  await expect(alice.getByText("此消息已撤回").first()).toBeVisible({ timeout: 15_000 });
+  // B 侧同步占位
+  await expect(bob.getByText("此消息已撤回").first()).toBeVisible({ timeout: 20_000 });
+  // 原文两侧均不再显示
+  await expect(alice.getByText("将被撤回的消息")).toHaveCount(0, { timeout: 10_000 });
+  await expect(bob.getByText("将被撤回的消息")).toHaveCount(0, { timeout: 10_000 });
+});

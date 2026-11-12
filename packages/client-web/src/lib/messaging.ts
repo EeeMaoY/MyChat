@@ -9,6 +9,7 @@
  */
 import {
   acceptSession,
+  randomBytes,
   applyPadding,
   createIdentity,
   decodePreKeyBundle,
@@ -133,6 +134,10 @@ export interface ChatMessage {
   status?: "sent" | "delivered" | "read";
   /** 群消息（did = group:<groupId>）：实际发送者（UI 显示气泡署名，M3-S11） */
   senderDid?: string;
+  /** in 消息：发送方的消息 id（撤回定位映射，S16） */
+  remoteId?: string;
+  /** 已撤回（本地占位保留，内容清除） */
+  recalled?: boolean;
 }
 
 /** 会话键：1:1 = 对方 DID；群组 = group:<groupId>（UI 与消息存储统一路由）。 */
@@ -199,9 +204,11 @@ export interface GroupKeysPayloadJson {
  * receipt 的 delivered/read 为对端消息 id 列表（批量合并，MR-1）。
  */
 type SessionPayload =
-  | { v: 1; type: "chat"; text: string }
+  | { v: 1; type: "chat"; text: string; mid?: string }
   | { v: 1; type: "receipt"; delivered: string[]; read: string[] }
-  | ({ v: 1; type: "image" | "file" } & AttachmentMeta)
+  | ({ v: 1; type: "image" | "file"; mid?: string } & AttachmentMeta)
+  /** 撤回声明（S16）：ids 为发送方消息 id（mid），接收方按 remoteId 匹配标记已撤回 */
+  | { v: 1; type: "recall"; ids: string[] }
   /** 好友托管：请求回传副本 / 回传副本（清单块 CID + 清单密钥，均为密文材料，FR-7.3） */
   | { v: 1; type: "custody-request"; forName: string | null }
   | { v: 1; type: "custody-reply"; cid: string; contentKey: string; nonce: string }
@@ -875,6 +882,10 @@ export class Messaging {
     if (!view) throw new Error("群不存在");
     const mySk = view.senderKeys.get(this.identity.did);
     if (!mySk) throw new Error("缺少本群发送密钥（等待群主重新分发）");
+    // 群内容消息同样注入 mid（撤回定位，S16）
+    if (payload.type === "chat" || payload.type === "image" || payload.type === "file") {
+      (payload as { mid?: string }).mid = `mid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    }
     const index = view.sendIndex;
     const plaintext = utf8ToBytes(JSON.stringify(payload));
     const groupWire = sealGroupMessage(
@@ -991,8 +1002,11 @@ export class Messaging {
           const parsed = JSON.parse(bytesToUtf8(opened.plaintext)) as SessionPayload;
           const chatKey = groupChatKey(groupId);
           if (parsed?.v === 1 && typeof parsed.type === "string") {
-            if (parsed.type === "chat") {
-              await this.appendLocalMessage(chatKey, "in", parsed.text, "chat", undefined, opened.senderDid);
+            if (parsed.type === "recall") {
+              // 群内撤回声明：按 remoteId 匹配（S16）
+              await this.applyRecall(chatKey, parsed.ids);
+            } else if (parsed.type === "chat") {
+              await this.appendLocalMessage(chatKey, "in", parsed.text, "chat", parsed, opened.senderDid);
             } else if (parsed.type === "image" || parsed.type === "file") {
               await this.appendLocalMessage(chatKey, "in", parsed.name, parsed.type, parsed, opened.senderDid);
             }
@@ -1746,12 +1760,18 @@ export class Messaging {
     kind: MessageKind,
     text: string,
   ): Promise<void> {
+    // 内容消息注入 mid（发送方命名空间，含时间分量防并发撞号）——撤回定位映射，S16
+    let mid: string | undefined;
+    if (payload.type === "chat" || payload.type === "image" || payload.type === "file") {
+      mid = `mid-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      (payload as { mid?: string }).mid = mid;
+    }
     const wire = sessionSend(session, utf8ToBytes(JSON.stringify(payload)));
     const mailboxId = sessionMailbox(session, "send", Date.now());
     const envelope = this.seal(wire, mailboxId);
     await this.deps.api.mailboxAppend(envelope.toPseudonym, envelope);
     if (payload.type !== "receipt") {
-      await this.appendLocalMessage(did, "out", text, kind, payload);
+      await this.appendLocalMessage(did, "out", text, kind, payload, undefined, mid);
     }
     this.emit();
   }
@@ -1956,6 +1976,10 @@ export class Messaging {
       await this.applyReceipt(did, payload);
       return null;
     }
+    if (payload.type === "recall") {
+      await this.applyRecall(did, payload.ids);
+      return null;
+    }
     if (payload.type === "custody-request") {
       // 恢复流（S7）：对方以已验证身份请求回传其托管副本；仅当所存副本归属与请求方一致时回传
       await this.replyCustopyIfHeld(did);
@@ -2026,7 +2050,7 @@ export class Messaging {
       return null;
     }
     if (payload.type === "chat") {
-      return await this.appendLocalMessage(did, "in", payload.text, "chat");
+      return await this.appendLocalMessage(did, "in", payload.text, "chat", payload);
     }
     // image / file
     return await this.appendLocalMessage(did, "in", payload.name, payload.type, payload);
@@ -2080,6 +2104,48 @@ export class Messaging {
     } catch {
       /* 回执失败不影响内容消息 */
     }
+  }
+
+  /**
+   * 撤回自己发送的消息（S16）：本地标记 recalled（占位保留）+ 发 recall 声明，
+   * 对端按 remoteId 匹配标记。ids = 本地 out 消息 id（发送时即 mid，见 sendPayload）。
+   */
+  async recallMessages(chatKey: string, ids: string[]): Promise<void> {
+    const isGroup = chatKey.startsWith("group:");
+    const session = isGroup ? this.sessions.get(chatKey.slice("group:".length)) : this.sessions.get(chatKey);
+    if (!session) throw new Error("会话不存在");
+    const list = this.messages.get(chatKey) ?? [];
+    const idSet = new Set(ids);
+    let changed = false;
+    for (const m of list) {
+      if (m.direction === "out" && idSet.has(m.id) && m.recalled !== true) {
+        m.recalled = true;
+        m.text = "此消息已撤回";
+        delete m.attachment;
+        await this.persistMessage(chatKey, m);
+        changed = true;
+      }
+    }
+    if (!changed) return;
+    const wire = sessionSend(session, utf8ToBytes(JSON.stringify({ v: 1, type: "recall", ids } satisfies SessionPayload)));
+    const mailboxId = sessionMailbox(session, "send", Date.now());
+    await this.deps.api.mailboxAppend(mailboxId, this.seal(wire, mailboxId));
+    this.emit();
+  }
+
+  /** 应用对端撤回声明：按 remoteId 匹配 in 消息，标记占位（S16；chatKey 支持 1:1 与群）。 */
+  private async applyRecall(chatKey: string, ids: string[]): Promise<void> {
+    const list = this.messages.get(chatKey) ?? [];
+    const idSet = new Set(ids);
+    for (const m of list) {
+      if (m.direction === "in" && m.remoteId !== undefined && idSet.has(m.remoteId) && m.recalled !== true) {
+        m.recalled = true;
+        m.text = "此消息已撤回";
+        delete m.attachment;
+        await this.persistMessage(chatKey, m);
+      }
+    }
+    this.emit();
   }
 
   /**
@@ -2171,6 +2237,7 @@ export class Messaging {
     kind: MessageKind,
     payload?: SessionPayload,
     senderDid?: string,
+    idOverride?: string,
   ): Promise<ChatMessage> {
     const attachment: AttachmentMeta | undefined =
       payload && (payload.type === "image" || payload.type === "file")
@@ -2184,13 +2251,16 @@ export class Messaging {
           }
         : undefined;
     const message: ChatMessage = {
-      id: `m${this.msgSeq}`,
+      id: idOverride ?? `m${this.msgSeq}`,
       did,
       direction,
       kind,
       text,
       ...(attachment ? { attachment } : {}),
       ...(senderDid ? { senderDid } : {}),
+      ...(direction === "in" && payload !== undefined && (payload.type === "chat" || payload.type === "image" || payload.type === "file") && payload.mid !== undefined
+        ? { remoteId: payload.mid }
+        : {}),
       at: Date.now(),
       ...(direction === "out" && kind !== "handshake" ? { status: "sent" as const } : {}),
     };

@@ -9,7 +9,7 @@ import {
   type ReactElement,
 } from "react";
 
-import { getGroupSummary, leaveGroup, markChatOpened, openChat, renameGroup, sendAttachment, sendMessage, setNotice, transferGroupOwnership, useAppState } from "../lib/app";
+import { getGroupSummary, leaveGroup, markChatOpened, openChat, recallMessage, renameGroup, sendAttachment, sendMessage, setNotice, transferGroupOwnership, useAppState } from "../lib/app";
 import type { ChatMessage } from "../lib/messaging";
 
 import { FileBubble, ImageBubble } from "./MessageAttachment";
@@ -84,6 +84,16 @@ export default function ChatPanel({ onBack, onAddFriend, onOpenMembers }: Props)
   function scrollToBottom(): void {
     const el = listRef.current;
     if (el !== null) el.scrollTop = el.scrollHeight;
+  }
+
+  /** 撤回自己的一条消息（两段确认在 UI 文案内完成：点击即撤，协议自动同步对端占位）。 */
+  async function handleRecall(m: ChatMessage): Promise<void> {
+    if (did === null) return;
+    try {
+      await recallMessage(did, [m.id]);
+    } catch (err) {
+      setNotice(err instanceof Error ? err.message : "撤回失败");
+    }
   }
 
   /** 同一会话 500ms 内的多次触发合并为一次 markChatOpened（打开会话 + 新到消息）。 */
@@ -198,8 +208,11 @@ export default function ChatPanel({ onBack, onAddFriend, onOpenMembers }: Props)
     el.style.height = `${Math.min(el.scrollHeight, TEXTAREA_MAX_PX)}px`;
   }
 
-  /** 单条消息体：图片/文件渲染附件气泡，其余按文本。 */
+  /** 单条消息体：已撤回渲染占位；图片/文件渲染附件气泡，其余按文本。 */
   function renderBody(m: ChatMessage, dir: "in" | "out"): ReactElement {
+    if (m.recalled === true) {
+      return <div className={`chat-bubble-${dir} recalled-bubble`}>此消息已撤回</div>;
+    }
     if (m.kind === "image" && m.attachment !== undefined) {
       return (
         <div className={`chat-bubble-${dir} media-bubble`}>
@@ -321,6 +334,15 @@ export default function ChatPanel({ onBack, onAddFriend, onOpenMembers }: Props)
               <span className="msg-meta">
                 <span className="msg-time">{formatClock(m.at)}</span>
                 {m.direction === "out" && <ReceiptBadge status={m.status} />}
+                {m.direction === "out" && m.recalled !== true && m.kind === "chat" && (
+                  <button
+                    className="msg-recall"
+                    title="撤回此消息"
+                    onClick={() => void handleRecall(m)}
+                  >
+                    撤回
+                  </button>
+                )}
               </span>
             </div>
           );
