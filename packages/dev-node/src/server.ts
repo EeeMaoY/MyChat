@@ -299,7 +299,23 @@ export function startDevNode(
     });
   });
 
-  const wss = new WebSocketServer({ noServer: true });
+  const wss = new WebSocketServer({ noServer: true, maxPayload: 4096 }); // 帧上限 4KB（协议仅承载唤醒通知，防大帧内存面）
+  // 连接表：上限护栏 + 心跳存活标记（清理半开连接的滞留订阅）
+  const wsConnections = new Set<WebSocket>();
+  const wsAlive = new Map<WebSocket, boolean>();
+  const WS_HEARTBEAT_MS = 30_000;
+  const wsHeartbeat = setInterval(() => {
+    for (const ws of wsConnections) {
+      if (ws.readyState !== WebSocket.OPEN) continue;
+      if (wsAlive.get(ws) === false) {
+        ws.terminate(); // 上一周期 pong 未回：判半开，强制断开（close 事件统一清理）
+        continue;
+      }
+      wsAlive.set(ws, false);
+      ws.ping();
+    }
+  }, WS_HEARTBEAT_MS);
+  wsHeartbeat.unref?.();
   server.on("upgrade", (req, socket, head) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     if (url.pathname !== "/v0/relay/subscribe") {
@@ -317,7 +333,19 @@ export function startDevNode(
       socket.destroy();
       return;
     }
+    // 连接数上限：超限直接销毁底层 socket（升级前拒绝，订阅面不被撑爆）
+    if (wsConnections.size >= limits.maxWsConnections) {
+      socket.destroy();
+      return;
+    }
     wss.handleUpgrade(req, socket, head, (ws) => {
+      wsConnections.add(ws);
+      wsAlive.set(ws, true);
+      ws.on("pong", () => wsAlive.set(ws, true));
+      ws.on("close", () => {
+        wsConnections.delete(ws);
+        wsAlive.delete(ws);
+      });
       for (const mailboxId of mailboxIds) {
         state.relay.subscribe(mailboxId, ws as WebSocket);
       }

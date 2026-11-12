@@ -509,4 +509,28 @@ describe("Relay（WS 唤醒 + 直投）", () => {
     });
     ws.close();
   });
+
+  it("WS 连接数上限：超限连接在升级前被拒（maxWsConnections）", async () => {
+    node = await startDevNode({ limits: { maxWsConnections: 2 } });
+    base = `http://127.0.0.1:${node.port}`;
+    const open = (mailbox: string) =>
+      new Promise<WebSocket>((resolve, reject) => {
+        const ws = new WebSocket(`ws://127.0.0.1:${node.port}/v0/relay/subscribe?mailbox=${encodeURIComponent(mailbox)}`);
+        ws.on("message", () => resolve(ws)); // 订阅确认（升级完成）
+        ws.on("error", reject);
+      });
+    const w1 = await open("ws-cap-1");
+    const w2 = await open("ws-cap-2");
+    w1.on("error", () => {});
+    w2.on("error", () => {});
+    const third = new WebSocket(`ws://127.0.0.1:${node.port}/v0/relay/subscribe?mailbox=${encodeURIComponent("ws-cap-3")}`);
+    const outcome = await new Promise<string>((resolve) => {
+      third.on("error", (err) => resolve(`error:${(err as Error).message}`));
+      third.on("open", () => resolve("open"));
+    });
+    expect(outcome).not.toBe("open"); // 服务端升级前销毁 socket，连接未建立
+    w1.close();
+    w2.close();
+    third.terminate();
+  });
 });

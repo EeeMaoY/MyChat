@@ -55,6 +55,8 @@ export const DEFAULT_LIMITS = {
   maxBlocksTotalBytes: 536_870_912,
   /** 信箱总数上限（防轮换随机 mailboxId 绕过按箱限刷） */
   maxMailboxes: 5000,
+  /** WS 并发连接数上限（半开连接/订阅表膨胀护栏） */
+  maxWsConnections: 64,
 } as const;
 
 export type Limits = { -readonly [K in keyof typeof DEFAULT_LIMITS]: number };
