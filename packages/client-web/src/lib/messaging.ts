@@ -9,6 +9,12 @@
  */
 import {
   acceptSession,
+  aeadDecrypt,
+  aeadEncrypt,
+  AEAD_KEY_LENGTH,
+  AEAD_NONCE_LENGTH,
+  concatBytes,
+  hkdfSha256,
   randomBytes,
   applyPadding,
   createIdentity,
@@ -244,9 +250,9 @@ type SessionPayload =
   | ({ v: 1; type: "image" | "file"; mid?: string } & AttachmentMeta)
   /** 撤回声明（S16）：ids 为发送方消息 id（mid），接收方按 remoteId 匹配标记已撤回 */
   | { v: 1; type: "recall"; ids: string[] }
-  /** 好友托管：请求回传副本 / 回传副本（清单块 CID + 清单密钥，均为密文材料，FR-7.3） */
+  /** 好友托管：请求回传副本 / 回传副本（清单块 CID + 身份派生密钥包裹后的清单密钥，托管者不可解，FR-7.3） */
   | { v: 1; type: "custody-request"; forName: string | null }
-  | { v: 1; type: "custody-reply"; cid: string; contentKey: string; nonce: string }
+  | { v: 1; type: "custody-reply"; cid: string; wrappedKey: string }
   /** 社交恢复（FR-1.3）：邀请成为守护者 / 请求回传分片 / 回传分片（设计报告 §4.3） */
   /** guardian-invite 的 did 为发送方自报，接收方不采信——归属一律以会话对端 did 为准 */
   | { v: 1; type: "guardian-invite"; did?: string; wrapCid: string; sealedShare: string }
@@ -294,6 +300,8 @@ const K_DEVICE_DK = "device-dk";
 const K_DEVICE_CERT = "device-cert";
 const K_MOMENT_KEY = "moment-key";
 const SETTING_READ_RECEIPTS = "setting:read-receipts";
+/** 托管备份内容密钥的包裹密钥派生标签（HKDF info，域分隔）。 */
+const CUSTODY_WRAP_INFO = "mychat:custody-ck-wrap:v1";
 /** OPK 池目标规模与低水位（M2 计划 §3.1：低于水位自动补充）。 */
 export const OPK_POOL_TARGET = 20;
 export const OPK_POOL_LOW = 5;
@@ -1512,7 +1520,9 @@ export class Messaging {
 
   /**
    * 好友托管备份（FR-7.3 M1 最小形态）：整包加密 → CAS 块 → 清单指针
-   * （CID + 清单密钥）经 E2EE 会话发给前 2 位联系人。好友不可读、互不知晓对方也是托管者。
+   * （CID + 包裹后的清单密钥）经 E2EE 会话发给前 2 位联系人。
+   * 清单密钥以本机身份派生的包裹密钥加密后才交出：托管者只持有密文块指针与无法解开的 wrappedKey，
+   * 不可读备份内容（备份包含身份私钥，明文密钥交给托管者等于交出整个账户）；互不知晓对方也是托管者。
    */
   async createCustodyBackup(): Promise<{ hosts: string[] }> {
     const hostDid = [...this.contacts.keys()].slice(0, 2);
@@ -1520,6 +1530,7 @@ export class Messaging {
     const bundleJson = await this.exportAll();
     const att = encryptAttachment(utf8ToBytes(bundleJson));
     await this.deps.api.putBlock(att.cid, att.ciphertext);
+    const wrappedKey = this.wrapCustodyKey(att.contentKey, att.nonce);
     for (const did of hostDid) {
       const session = this.sessions.get(did);
       if (!session) continue;
@@ -1530,8 +1541,7 @@ export class Messaging {
             v: 1,
             type: "custody-reply",
             cid: att.cid,
-            contentKey: base58Encode(att.contentKey),
-            nonce: base58Encode(att.nonce),
+            wrappedKey,
           } satisfies SessionPayload),
         ),
       );
@@ -1542,29 +1552,57 @@ export class Messaging {
     return { hosts: hostDid };
   }
 
-  /** 我持有的他人托管副本（恢复流 S7：凭身份恢复后向持有者请求回传）。 */
-  async listCustodyCopies(): Promise<{ fromDid: string; cid: string; contentKey: string; nonce: string }[]> {
-    const out: { fromDid: string; cid: string; contentKey: string; nonce: string }[] = [];
+  /**
+   * 托管内容密钥的包裹密钥：由本机身份派生（HKDF：ikm = IK-ed 私钥，salt = IK-ed 公钥）。
+   * 只有身份持有者可派生；身份经社交恢复后可重新派生，故恢复流仍能解开回传的副本。
+   */
+  private custodyWrapKey(): Uint8Array {
+    return hkdfSha256(this.identity.ikEd.privateKey, this.identity.ikEd.publicKey, CUSTODY_WRAP_INFO);
+  }
+
+  /** 包裹：wrapNonce(24B) ∥ AEAD(wrapKey, wrapNonce, contentKey(32B) ∥ nonce(24B))，整体 base58。 */
+  private wrapCustodyKey(contentKey: Uint8Array, nonce: Uint8Array): string {
+    const wrapNonce = randomBytes(AEAD_NONCE_LENGTH);
+    const sealed = aeadEncrypt(this.custodyWrapKey(), wrapNonce, concatBytes(contentKey, nonce));
+    return base58Encode(concatBytes(wrapNonce, sealed));
+  }
+
+  /** 解包（wrapCustodyKey 的逆）：非本人身份派生的密钥、被篡改的密文均在 AEAD 认证处抛错。 */
+  private unwrapCustodyKey(wrappedKey: string): { contentKey: Uint8Array; nonce: Uint8Array } {
+    const bytes = base58Decode(wrappedKey);
+    const plain = aeadDecrypt(this.custodyWrapKey(), bytes.slice(0, AEAD_NONCE_LENGTH), bytes.slice(AEAD_NONCE_LENGTH));
+    if (plain.length !== AEAD_KEY_LENGTH + AEAD_NONCE_LENGTH) throw new Error("托管密钥包裹格式非法");
+    return { contentKey: plain.slice(0, AEAD_KEY_LENGTH), nonce: plain.slice(AEAD_KEY_LENGTH) };
+  }
+
+  /** 我持有的托管副本指针：他人交我保管的（我不可解），或恢复流中持有者回传给我的本人副本（S7）。 */
+  async listCustodyCopies(): Promise<{ fromDid: string; cid: string; wrappedKey: string }[]> {
+    const out: { fromDid: string; cid: string; wrappedKey: string }[] = [];
     for (const key of await this.deps.kv.keys("custody:")) {
       const raw = await this.deps.kv.get(key);
       if (!raw) continue;
-      const payload = JSON.parse(bytesToUtf8(raw)) as { cid: string; contentKey: string; nonce: string };
-      out.push({ fromDid: key.slice("custody:".length), ...payload });
+      const payload = JSON.parse(bytesToUtf8(raw)) as { cid: string; wrappedKey: string };
+      // 旧形态（明文 contentKey/nonce）条目不再识别
+      if (typeof payload.cid !== "string" || typeof payload.wrappedKey !== "string") continue;
+      out.push({ fromDid: key.slice("custody:".length), cid: payload.cid, wrappedKey: payload.wrappedKey });
     }
     return out;
   }
 
-  /** 解密一份托管副本为备份 JSON（恢复流：先社交恢复身份，再解密清单导入）。 */
-  async decryptCustodyCopy(copy: { cid: string; contentKey: string; nonce: string }): Promise<string> {
+  /**
+   * 解密一份托管副本为备份 JSON（恢复流：先社交恢复身份，再解密清单导入）。
+   * 仅备份所有者本人（同一身份）可解：先以身份派生密钥解包清单密钥，再解附件块。
+   */
+  async decryptCustodyCopy(copy: { cid: string; wrappedKey: string }): Promise<string> {
     const ciphertext = await this.deps.api.getBlock(copy.cid);
     if (!ciphertext) throw new Error("托管副本块不存在（节点无此数据）");
-    return bytesToUtf8(
-      decryptAttachment({
-        ciphertext,
-        contentKey: base58Decode(copy.contentKey),
-        nonce: base58Decode(copy.nonce),
-      }),
-    );
+    let keys: { contentKey: Uint8Array; nonce: Uint8Array };
+    try {
+      keys = this.unwrapCustodyKey(copy.wrappedKey);
+    } catch {
+      throw new Error("无法解开托管副本：仅备份所有者本人可解密");
+    }
+    return bytesToUtf8(decryptAttachment({ ciphertext, contentKey: keys.contentKey, nonce: keys.nonce }));
   }
 
   // ----- 社交恢复（FR-1.3，M1 计划 §2 S7） -----
@@ -2047,10 +2085,11 @@ export class Messaging {
       return null;
     }
     if (payload.type === "custody-reply") {
-      // 静默存储：好友的托管材料（密文清单指针），不出现在聊天记录
+      // 静默存储：好友的托管材料（密文块指针 + 我无法解开的包裹密钥），不出现在聊天记录
+      if (typeof payload.cid !== "string" || typeof payload.wrappedKey !== "string") return null;
       await this.deps.kv.put(
         `custody:${did}`,
-        utf8ToBytes(JSON.stringify({ cid: payload.cid, contentKey: payload.contentKey, nonce: payload.nonce })),
+        utf8ToBytes(JSON.stringify({ cid: payload.cid, wrappedKey: payload.wrappedKey })),
       );
       return null;
     }
@@ -2125,10 +2164,14 @@ export class Messaging {
     if (!raw) return;
     const session = this.sessions.get(requesterDid);
     if (!session) return;
-    const held = JSON.parse(bytesToUtf8(raw)) as { cid: string; contentKey: string; nonce: string };
+    const held = JSON.parse(bytesToUtf8(raw)) as { cid: string; wrappedKey: string };
+    // 旧形态（明文 contentKey/nonce）条目不回传：绝不再把明文密钥送上线路
+    if (typeof held.cid !== "string" || typeof held.wrappedKey !== "string") return;
     const wire = sessionSend(
       session,
-      utf8ToBytes(JSON.stringify({ v: 1, type: "custody-reply", ...held } satisfies SessionPayload)),
+      utf8ToBytes(
+        JSON.stringify({ v: 1, type: "custody-reply", cid: held.cid, wrappedKey: held.wrappedKey } satisfies SessionPayload),
+      ),
     );
     const mailboxId = sessionMailbox(session, "send", Date.now());
     await this.deps.api.mailboxAppend(mailboxId, this.seal(wire, mailboxId));

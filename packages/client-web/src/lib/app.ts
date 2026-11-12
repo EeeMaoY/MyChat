@@ -485,17 +485,12 @@ export async function createCustodyBackup(): Promise<{ hosts: string[] }> {
   return messaging.createCustodyBackup();
 }
 
-export async function listCustodyCopies(): Promise<
-  { fromDid: string; cid: string; contentKey: string; nonce: string }[]
-> {
+export async function listCustodyCopies(): Promise<{ fromDid: string; cid: string; wrappedKey: string }[]> {
   return (await messaging?.listCustodyCopies()) ?? [];
 }
 
-export async function decryptCustodyCopy(copy: {
-  cid: string;
-  contentKey: string;
-  nonce: string;
-}): Promise<string> {
+/** 仅备份所有者本人可解（wrappedKey 由身份派生密钥包裹，托管者解不开）。 */
+export async function decryptCustodyCopy(copy: { cid: string; wrappedKey: string }): Promise<string> {
   if (!messaging) throw new Error("应用尚未就绪");
   return messaging.decryptCustodyCopy(copy);
 }
