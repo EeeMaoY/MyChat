@@ -1111,6 +1111,10 @@ export class Messaging {
           const groupWire = stripPadding(envelope.payload);
           const opened = openGroupMessage(view, groupWire);
           openedAny = true;
+          // 自回声跳过（与 1:1 语义一致）：同一身份的多设备消息不经群信箱同步入库，
+          // 单设备为主场景——否则自己每条群消息显示两次（右 out + 左 in）。
+          // openGroupMessage 已推进的本方 recvIndex 不回退（防重放闸保持有效）。
+          if (opened.senderDid === this.identity.did) continue;
           // 群内载荷同样出自不可信对端：过同一 parser（形状非法 → null → 丢弃，防渲染期白屏）
           const parsed = parseSessionPayload(bytesToUtf8(opened.plaintext));
           const chatKey = groupChatKey(groupId);
