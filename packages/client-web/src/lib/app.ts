@@ -44,6 +44,13 @@ let pendingName: string | null = null;
 let lastActivityAt = 0;
 const AUTO_LOCK_MS = 15 * 60_000;
 let autoLockTimer: ReturnType<typeof setInterval> | null = null;
+/** 自动锁定的活动监听器引用（startAutoLock 保存，stopAutoLock 逐一移除，防"锁定→解锁"翻倍泄漏）。 */
+let autoLockActivity: (() => void) | null = null;
+/**
+ * 装配代数：lockApp 递增。startApp 在每个 await 间隙比对，过期即放弃——
+ * 否则锁定在装配 await 期间发生时 messaging 已置 null，续后代码 null 解引用成 unhandled rejection。
+ */
+let assembleEpoch = 0;
 
 let state: AppState = {
   phase: "loading",
@@ -139,6 +146,7 @@ export async function unlockApp(passphrase: string): Promise<boolean> {
 
 /** 立即锁定：丢弃 KEK 与全部内存态（含 Messaging 实例），回到锁屏。 */
 export function lockApp(): void {
+  assembleEpoch += 1; // 作废进行中的 startApp 装配（其 await 间隙检测到即退出）
   stopAutoLock();
   messaging?.stopRealtime();
   messaging = null;
@@ -163,6 +171,7 @@ function startAutoLock(): void {
   const refresh = (): void => {
     lastActivityAt = Date.now();
   };
+  autoLockActivity = refresh;
   window.addEventListener("mousemove", refresh, { passive: true });
   window.addEventListener("keydown", refresh, { passive: true });
   window.addEventListener("click", refresh, { passive: true });
@@ -172,6 +181,13 @@ function startAutoLock(): void {
 }
 
 function stopAutoLock(): void {
+  // 活动监听器一并移除（此前只清 interval，每次"锁定→解锁"三个监听翻倍泄漏）
+  if (autoLockActivity !== null) {
+    window.removeEventListener("mousemove", autoLockActivity);
+    window.removeEventListener("keydown", autoLockActivity);
+    window.removeEventListener("click", autoLockActivity);
+    autoLockActivity = null;
+  }
   if (autoLockTimer !== null) {
     clearInterval(autoLockTimer);
     autoLockTimer = null;
@@ -181,33 +197,43 @@ function stopAutoLock(): void {
 /** 已解锁后的装配（load 身份/对账/实时通道）。 */
 async function startApp(): Promise<void> {
   if (kv === null) return;
+  const epoch = assembleEpoch;
   const api = new NodeApi(nodeBaseUrl());
   const loaded = await Messaging.load({ api, kv });
+  // 装配期间发生锁定：本次装配作废（messaging 已被 lockApp 置 null 语义接管，续后操作作废）
+  if (epoch !== assembleEpoch) return;
   if (!loaded) {
-    setState({ phase: "welcome", vaultConfigured: await isVaultConfigured(kv) });
+    const vaultConfigured = await isVaultConfigured(kv);
+    if (epoch !== assembleEpoch) return;
+    setState({ phase: "welcome", vaultConfigured });
     return;
   }
   messaging = loaded;
   messaging.onStateChange = syncFromMessaging;
   bindNotifications();
-  setState({ phase: "main", did: messaging.identity.did, vaultConfigured: await isVaultConfigured(kv) });
+  const vaultConfigured = await isVaultConfigured(kv);
+  if (epoch !== assembleEpoch) return;
+  setState({ phase: "main", did: messaging.identity.did, vaultConfigured });
   syncFromMessaging();
   // 与节点对账（节点重启/清空后自动重登记与重传，M3 修复）
   try {
     const reconcileNotice = await messaging.reconcileWithNode();
+    if (epoch !== assembleEpoch) return; // await 期间锁定：不再触碰任何内存态/UI
     if (reconcileNotice !== null) setNotice(reconcileNotice);
   } catch {
     /* 对账失败不阻塞进入主界面（刷新页面即重试） */
   }
   // KT 日志完整性静默核验（加固批次 ④）：异常才警示
-  void messaging.verifyKTIntegrity().then((result) => {
+  const m = messaging;
+  void m.verifyKTIntegrity().then((result) => {
+    if (epoch !== assembleEpoch) return;
     if (!result.ok && result.checked > 0) setNotice(`KT 日志核验异常：${result.detail}`);
   });
-  messaging.startRealtime();
-  void messaging.poll();
+  m.startRealtime();
+  void m.poll();
   startAutoLock();
   // Web Push（M4-S15）：通知权限已 granted 时建立离线订阅（fire-and-forget 增强）
-  void ensurePushSubscription(new NodeApi(nodeBaseUrl()), messaging.realtimeMailboxes());
+  void ensurePushSubscription(new NodeApi(nodeBaseUrl()), m.realtimeMailboxes());
 }
 
 // ---------- 口令密钥库操作（加固批次 ①，UI 接入用） ----------
