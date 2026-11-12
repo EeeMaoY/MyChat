@@ -25,8 +25,9 @@ export function formatListTime(at: number): string {
   return `${mo}-${day}`;
 }
 
-/** 摘要截断：超长加省略号。 */
-export function truncate(text: string, max: number): string {
+/** 摘要截断：超长加省略号。非字符串输入返回空串（渲染层防御：入站字段已校验，历史脏数据兜底）。 */
+export function truncate(text: unknown, max: number): string {
+  if (typeof text !== "string") return "";
   return text.length > max ? `${text.slice(0, max)}…` : text;
 }
 

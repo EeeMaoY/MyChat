@@ -8,6 +8,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { bootstrap, createMyIdentity, setNotice, useAppState } from "./lib/app";
 
 import CreatingPage from "./pages/CreatingPage";
+import ErrorBoundary from "./components/ErrorBoundary";
 import LockedPage from "./components/LockedPage";
 import MainPage from "./pages/MainPage";
 import RecoveryWizard from "./pages/RecoveryWizard";
@@ -127,7 +128,8 @@ export default function App() {
           </button>
         </div>
       )}
-      {page}
+      {/* 渲染错误边界：子树渲染异常时显示兜底界面，不让 React 卸载整棵树（白屏） */}
+      <ErrorBoundary>{page}</ErrorBoundary>
     </>
   );
 }

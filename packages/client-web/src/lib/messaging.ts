@@ -102,6 +102,7 @@ import {
 import { fromBase64, fromHex, toBase64, toHex } from "./base64";
 import { discoveryInboxId } from "./discovery";
 import type { NodeApi } from "./node-api";
+import { isStructuredPayload, parseSessionPayload } from "./validate";
 
 /** 握手首条消息的明文结构（协议规范 v0.1 §握手；对端据此识别发起方） */
 interface HandshakePayload {
@@ -233,6 +234,7 @@ export interface GroupKeysPayloadJson {
 /**
  * 会话明文载荷（M1 计划 §3.1 结构化约定；wire 格式不变，协议规范 §7 不升版）。
  * receipt 的 delivered/read 为对端消息 id 列表（批量合并，MR-1）。
+ * 形状校验见 lib/validate.ts（对端载荷不可信，入站必须先过 parser）。
  */
 /** 引用快照（S17）：随消息传输的被回复消息摘要（快照语义——对端撤回不影响引用显示）。 */
 export interface ReplyQuote {
@@ -244,7 +246,7 @@ export interface ReplyQuote {
   text: string;
 }
 
-type SessionPayload =
+export type SessionPayload =
   | { v: 1; type: "chat"; text: string; mid?: string; replyTo?: ReplyQuote }
   | { v: 1; type: "receipt"; delivered: string[]; read: string[] }
   | ({ v: 1; type: "image" | "file"; mid?: string } & AttachmentMeta)
@@ -1065,9 +1067,10 @@ export class Messaging {
         try {
           const groupWire = stripPadding(envelope.payload);
           const opened = openGroupMessage(view, groupWire);
-          const parsed = JSON.parse(bytesToUtf8(opened.plaintext)) as SessionPayload;
+          // 群内载荷同样出自不可信对端：过同一 parser（形状非法 → null → 丢弃，防渲染期白屏）
+          const parsed = parseSessionPayload(bytesToUtf8(opened.plaintext));
           const chatKey = groupChatKey(groupId);
-          if (parsed?.v === 1 && typeof parsed.type === "string") {
+          if (parsed !== null) {
             if (parsed.type === "recall") {
               // 群内撤回声明：按 remoteId 匹配（S16）
               await this.applyRecall(chatKey, parsed.ids);
@@ -1997,10 +2000,13 @@ export class Messaging {
         void this.deps.api.consumeOpk(this.identity.did, usedOpkId, this.deviceDkId).catch(() => undefined);
         void this.topUpOpkPool().catch(() => undefined);
       }
-      const handshake = JSON.parse(bytesToUtf8(plaintext)) as HandshakePayload;
-      if (handshake.v !== 1 || typeof handshake.fromDid !== "string") return;
+      const handshake = JSON.parse(bytesToUtf8(plaintext)) as Partial<HandshakePayload> | null;
+      if (handshake === null || handshake.v !== 1 || typeof handshake.fromDid !== "string") return;
       // 自报 fromDid 未绑定到 X3DH 发起方身份：静默丢弃（否则可顶替已有联系人会话 / 伪造 DID 入申请队列）
       if (!verifyHandshakeIdentity(handshake.fromDid, handshake.ikxSig, msg.x3dh.ikxSenderPublic)) return;
+      // 运行时校验（防渲染期 TypeError 白屏）：fromName 仅接受 string|null、note 仅接受 string，畸形值归一为中性缺省
+      const fromName = typeof handshake.fromName === "string" ? handshake.fromName : null;
+      const note = typeof handshake.note === "string" ? handshake.note : "";
 
       // M3 修复（好友确认流）：已知好友的新握手沿用 S9 替换语义（设备变更/恢复场景）；
       // 陌生人首次握手完成密码学处理（accept + OPK 消耗，与 Signal 语义一致）后
@@ -2018,14 +2024,14 @@ export class Messaging {
         utf8ToBytes(
           JSON.stringify({
             fromDid: handshake.fromDid,
-            name: handshake.fromName ?? null,
-            note: handshake.note,
+            name: fromName,
+            note,
             sessionWire: serializeSession(session),
             at: Date.now(),
           } satisfies FriendRequestStored),
         ),
       );
-      this.onFriendRequest?.(handshake.fromDid, handshake.fromName ?? null);
+      this.onFriendRequest?.(handshake.fromDid, fromName);
       this.emit();
     } catch {
       // OPK 全部消耗/篡改等失败：忽略（陌生人重放握手被天然拒绝）
@@ -2061,14 +2067,13 @@ export class Messaging {
 
   /** 解析会话载荷并落库；返回内容类消息（回执返回 null）。兼容 M0 纯文本消息。 */
   private async handleSessionPayload(did: string, raw: string): Promise<ChatMessage | null> {
-    let payload: SessionPayload;
-    try {
-      const parsed = JSON.parse(raw) as SessionPayload;
-      if (parsed?.v !== 1 || typeof parsed.type !== "string") throw new Error("bad payload");
-      payload = parsed;
-    } catch {
-      // M0 时期的纯文本消息（协议规范 v0.1 过渡兼容）
-      return await this.appendLocalMessage(did, "in", raw, "chat");
+    const payload = parseSessionPayload(raw);
+    if (payload === null) {
+      // 运行时校验失败（防渲染期 TypeError 白屏，安全加固批次）：
+      // M0 时期的纯文本消息（非 v1 结构化外形）按文本落库（raw 本身即 string，渲染安全）；
+      // 外形是结构化载荷但字段非法 / type 未知 → 丢弃不落库
+      if (!isStructuredPayload(raw)) return await this.appendLocalMessage(did, "in", raw, "chat");
+      return null;
     }
 
     if (payload.type === "receipt") {
