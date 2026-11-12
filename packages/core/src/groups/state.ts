@@ -49,7 +49,9 @@ export interface GroupState {
 /** 防拼接歧义的确定性编码（导出供测试与审计复核）。 */
 export function groupStateMessage(fields: Omit<GroupState, "signature">): Uint8Array {
   const parts: Uint8Array[] = [utf8ToBytes(STATE_SIGNING_PREFIX), prefixed(fields.groupId), prefixed(fields.name), prefixed(fields.owner), uint32(fields.epoch), uint16(fields.members.length)];
-  const sorted = [...fields.members].sort((a, b) => (a.did < b.did ? -1 : 1));
+  // 严格弱序全序比较器（相等须返回 0）：did 相等时旧比较器返回 1 违反契约，
+  // 同一含重复成员的状态在不同引擎的排序实现下可能产生不同规范化编码（验签分叉面）
+  const sorted = [...fields.members].sort((a, b) => (a.did < b.did ? -1 : a.did > b.did ? 1 : 0));
   for (const m of sorted) {
     parts.push(prefixed(m.did), new Uint8Array([m.role === "owner" ? 0 : 1]), uint32(m.joinedEpoch));
   }
@@ -131,6 +133,13 @@ export function verifyGroupState(state: GroupState, prevState?: GroupState): boo
   if (!Number.isSafeInteger(state.epoch) || state.epoch < 1) return false;
   if (state.name.length === 0 || utf8ToBytes(state.name).length > NAME_MAX_BYTES) return false;
   if (state.members.length === 0 || state.members.length > GROUP_MEMBER_LIMIT) return false;
+  // 成员 did 不得重复：重复成员没有唯一规范化序（不同引擎排序结果可能不同，
+  // 签名验证会分叉）；合法路径 createGroup 以 Set 去重，此检查只拦篡改态
+  const seen = new Set<string>();
+  for (const m of state.members) {
+    if (seen.has(m.did)) return false;
+    seen.add(m.did);
+  }
   if (!state.members.some((m) => m.role === "owner" && m.did === state.owner)) return false;
   try {
     base58Decode(state.groupId);
