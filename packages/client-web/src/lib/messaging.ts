@@ -2052,7 +2052,10 @@ export class Messaging {
           const wire = stripPadding(envelope.payload);
           const plaintext = sessionReceive(session, wire);
           const message = await this.handleSessionPayload(did, bytesToUtf8(plaintext));
-          if (message) deliveredIds.push(message.id);
+          // 回执 id 必须落在发送方的 mid 命名空间：本地入库 id 是 m<seq>（接收方本地序号），
+          // 发送方 out 消息 id 是其注入的 mid——两套 id 空间仅经 in 消息的 remoteId（载荷 mid）映射。
+          // 直接回本地 id 会与发送方的 out 消息 id 永不相交，送达/已读勾永远不出现。
+          if (message) deliveredIds.push(message.remoteId ?? message.id);
         } catch {
           // 篡改/重放/跨会话密文：丢弃（SR-4）
         }
@@ -2200,6 +2203,7 @@ export class Messaging {
       for (const message of list) {
         if (message.direction === "out") await this.persistMessage(did, message);
       }
+      this.emit(); // 回执状态即时上抛 UI（不等轮询周期收尾）
     }
   }
 
@@ -2266,9 +2270,11 @@ export class Messaging {
   async markChatOpened(did: string): Promise<void> {
     if (!(await this.readReceiptsEnabled())) return;
     const list = this.messages.get(did) ?? [];
+    // readConfirmed 与 readIds 使用同一键（remoteId ?? id，即发送方 mid 命名空间）：
+    // 双 id 空间（本地 m<seq> vs 发送方 mid）的映射语义与 pollSession 的 delivered 回执一致。
     const readIds = list
-      .filter((m) => m.direction === "in" && m.kind !== "handshake" && !this.readConfirmed.has(m.id))
-      .map((m) => m.id);
+      .filter((m) => m.direction === "in" && m.kind !== "handshake" && !this.readConfirmed.has(m.remoteId ?? m.id))
+      .map((m) => m.remoteId ?? m.id);
     if (readIds.length === 0) return;
     for (const id of readIds) this.readConfirmed.add(id);
     await this.sendReceipt(did, { delivered: [], read: readIds });
