@@ -37,7 +37,12 @@ export function foldDeviceEvents(events: KTEvent[], opts: FoldDeviceEventsOption
   const byDkId = new Map<string, DeviceView>();
   let invalidEvents = 0;
 
-  for (const event of events) {
+  // 折叠前按事件序（KT index）升序稳定排序：IKTLog.list 未承诺返回有序数组，
+  // 乱序输入（吊销事件在数组中先于其登记到达）此前会被永久丢弃，使被吊销
+  // 设备以未吊销状态折叠。同 index 冲突保持原序（稳定排序，防御性约定）。
+  const ordered = [...events].sort((a, b) => a.index - b.index);
+
+  for (const event of ordered) {
     const text = bytesToUtf8(event.payload);
     try {
       if (event.type === "device-add") {
@@ -63,8 +68,8 @@ export function foldDeviceEvents(events: KTEvent[], opts: FoldDeviceEventsOption
           prev.revoked = true;
           prev.revokedAt = revocation.revokedAt;
         }
-        // 吊销先于登记事件到达（乱序/重放）：记录后仍忽略——登记事件会带来未吊销视图，
-        // 由上层以"事件流完整取回"的约定保证不发生（KT list 为全量事件）。
+        // 按 index 排序后此处仅剩"吊销指向从未登记的 dkId"（或事件流被截断）：
+        // 无可折叠对象，保持忽略。
       } else {
         continue; // register 等其他事件类型与本折叠无关
       }
