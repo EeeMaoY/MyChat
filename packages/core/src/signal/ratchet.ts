@@ -25,6 +25,12 @@ const ROOT_INFO = "mychat:dr:rk:v1";
 const CHAIN_INFO = "mychat:dr:ck:v1";
 /** 单方向允许跳过的最大消息数（Signal 规范默认 2000，M0 收紧为 1000）。 */
 export const MAX_SKIP = 1000;
+/**
+ * skipped 存储全局上限：伪造 header（随机 dh + 大 n）可借 skipMessageKeys
+ * 无限膨胀 skipped 存储（存储 DoS）；达上限即拒绝，由 ratchetDecrypt 的
+ * 事务回滚兜底，会话状态保持解密前原样。
+ */
+export const MAX_SKIPPED_TOTAL = 4000;
 
 /** 消息头（明文传输，进入 AEAD 关联数据）。 */
 export interface DrHeader {
@@ -131,6 +137,12 @@ export function ratchetEncrypt(
 /**
  * 解密一条消息。支持乱序（跳过的 key 存入 skipped）；同一 (dh, n) 重放会 throw。
  * 就地推进状态（可能触发 DH ratchet 与链跳转）。
+ *
+ * 事务式提交：链推进路径在 AEAD 验证成功前不提交任何状态——推进/跳存/DH
+ * ratchet 期间任何一步 throw（AEAD 验证失败、跳存超限、DH 低阶点抛错）都会
+ * 回滚到解密前状态。否则旧代消息重放会触发错误方向的 DH ratchet 使双方
+ * rootKey 永久分叉（会话死亡），伪造 header 则能把 skipped/recvCount 推到
+ * 伪造位置，后续真实消息全部被拒。
  */
 export function ratchetDecrypt(
   state: RatchetState,
@@ -142,9 +154,12 @@ export function ratchetDecrypt(
   const keyId = skippedKey(header.dh, header.n);
   const reused = state.skipped.get(keyId);
   if (reused !== undefined) {
-    // key 尚在 = 消息曾被显式跳过保存；直接消费并删除 → 重放必败
+    // key 尚在 = 消息曾被显式跳过保存；先解密成功再删除：解密失败保留 key，
+    // 真实乱序消息重投仍可解。同密文重复投递会重复出明文（Signal 同款语义），
+    // 由应用层按 mid 去重兜底。
+    const plaintext = aeadDecrypt(reused, nonce, ciphertext, concatBytes(ad, encodeHeader(header), nonce));
     state.skipped.delete(keyId);
-    return aeadDecrypt(reused, nonce, ciphertext, concatBytes(ad, encodeHeader(header), nonce));
+    return plaintext;
   }
 
   if (state.dhRemote !== null && bytesEqualHeader(header.dh, state.dhRemote) && header.n < state.recvCount) {
@@ -153,20 +168,49 @@ export function ratchetDecrypt(
     throw new Error("ratchet: 消息重放或已消费（链内旧序号）");
   }
 
-  if (state.dhRemote === null || !bytesEqualHeader(header.dh, state.dhRemote)) {
-    skipMessageKeys(state, header.pn); // 旧链剩余 key 全部跳存
-    dhRatchet(state, header.dh);
-  }
-  skipMessageKeys(state, header.n);
+  // 快照将被链推进路径替换的全部状态字段；skipped 只追加不替换（Map 插入序），
+  // 记录进入时的大小即可识别本轮新增键。skippedMap 引用本身从不被替换。
+  const snapshot = {
+    rootKey: state.rootKey,
+    dhSelf: state.dhSelf,
+    dhRemote: state.dhRemote,
+    sendChainKey: state.sendChainKey,
+    recvChainKey: state.recvChainKey,
+    sendCount: state.sendCount,
+    recvCount: state.recvCount,
+    prevSendCount: state.prevSendCount,
+  };
+  const skippedSizeBefore = state.skipped.size;
+  try {
+    if (state.dhRemote === null || !bytesEqualHeader(header.dh, state.dhRemote)) {
+      skipMessageKeys(state, header.pn); // 旧链剩余 key 全部跳存
+      dhRatchet(state, header.dh);
+    }
+    skipMessageKeys(state, header.n);
 
-  if (state.recvChainKey === null) {
-    throw new Error("ratchet: 接收链未建立");
-  }
-  const step = kdfChainKey(state.recvChainKey);
-  state.recvChainKey = step.chainKey;
-  state.recvCount += 1;
+    if (state.recvChainKey === null) {
+      throw new Error("ratchet: 接收链未建立");
+    }
+    const step = kdfChainKey(state.recvChainKey);
+    state.recvChainKey = step.chainKey;
+    state.recvCount += 1;
 
-  return aeadDecrypt(step.messageKey, nonce, ciphertext, concatBytes(ad, encodeHeader(header), nonce));
+    // AEAD 验证成功前的一切改动都属"未提交"：失败即整体回滚
+    return aeadDecrypt(step.messageKey, nonce, ciphertext, concatBytes(ad, encodeHeader(header), nonce));
+  } catch (err) {
+    state.rootKey = snapshot.rootKey;
+    state.dhSelf = snapshot.dhSelf;
+    state.dhRemote = snapshot.dhRemote;
+    state.sendChainKey = snapshot.sendChainKey;
+    state.recvChainKey = snapshot.recvChainKey;
+    state.sendCount = snapshot.sendCount;
+    state.recvCount = snapshot.recvCount;
+    state.prevSendCount = snapshot.prevSendCount;
+    // 删除本轮新增的 skipped 键（新增键必然位于 Map 插入序尾部）
+    const staleKeys = [...state.skipped.keys()].slice(skippedSizeBefore);
+    for (const k of staleKeys) state.skipped.delete(k);
+    throw err;
+  }
 }
 
 function bytesEqualHeader(a: Uint8Array, b: Uint8Array): boolean {
@@ -176,11 +220,16 @@ function bytesEqualHeader(a: Uint8Array, b: Uint8Array): boolean {
   return diff === 0;
 }
 
-/** 把当前接收链推进 n 步，跳过的 message key 存入 skipped（上限 MAX_SKIP）。 */
+/** 把当前接收链推进 n 步，跳过的 message key 存入 skipped（上限 MAX_SKIP 与全局上限 MAX_SKIPPED_TOTAL）。 */
 function skipMessageKeys(state: RatchetState, until: number): void {
   if (state.recvChainKey === null) return;
   if (state.recvCount + MAX_SKIP < until) {
     throw new Error(`ratchet: 跳过消息数超过上限 ${MAX_SKIP}（疑似异常或攻击）`);
+  }
+  // 全局上限（防存储 DoS）：伪造 header 每条可净增至多 MAX_SKIP 个键，
+  // 达上限后直接拒绝，事务回滚保证会话状态不受影响。
+  if (state.skipped.size >= MAX_SKIPPED_TOTAL) {
+    throw new Error(`ratchet: skipped 存储达全局上限 ${MAX_SKIPPED_TOTAL}（疑似存储 DoS）`);
   }
   while (state.recvCount < until) {
     const step = kdfChainKey(state.recvChainKey);
