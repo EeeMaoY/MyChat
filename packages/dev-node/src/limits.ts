@@ -45,6 +45,12 @@ export const DEFAULT_LIMITS = {
   registerPerMin: 60,
   /** 块总量上限（内存/磁盘资源护栏） */
   maxBlocks: 20_000,
+  /** 每分钟手动 KT 追加上限（每次 append 全量重建 Merkle 根，O(n²) 累积，限流压住） */
+  ktAppendPerMin: 60,
+  /** 每 DID 每分钟设备凭证登记上限 */
+  devicePutPerMin: 60,
+  /** 单 DID 设备数上限（防凭证表被单 DID 无限膨胀） */
+  maxDevicesPerDid: 32,
 } as const;
 
 export type Limits = { -readonly [K in keyof typeof DEFAULT_LIMITS]: number };

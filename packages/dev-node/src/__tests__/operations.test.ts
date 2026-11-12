@@ -10,15 +10,19 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 
 import {
   createIdentity,
+  encodeDeviceCertificateJson,
   encodePreKeyBundle,
+  generateEd25519KeyPair,
   generateX25519KeyPair,
   issuePreKeyBundle,
   ktVerifyInclusion,
+  makeDeviceCertificate,
   makeEnvelope,
   makeUserNameRecord,
   randomBytes,
   utf8ToBytes,
   type Envelope,
+  type Identity,
   type KTEvent,
   type KtInclusionProof,
 } from "@mychat/core";
@@ -275,5 +279,82 @@ describe("持久化快照与轮转（M4-S13）", () => {
     expect(
       ktVerifyInclusion({ did: alice.did, type: "revoke", index: 6, payload: utf8ToBytes("manual-note") }, manualProof.proof, newRoot.root),
     ).toBe(true);
+  });
+});
+
+describe("KT 追加与设备登记加固", () => {
+  /** 以身份签发设备凭证 JSON（不落库，直接 PUT 用）。 */
+  function makeCertJson(identity: Identity): string {
+    const cert = makeDeviceCertificate(identity.ikEd.privateKey, identity.did, generateEd25519KeyPair().publicKey, "limit-test", 3_600_000);
+    return JSON.stringify(JSON.parse(encodeDeviceCertificateJson(cert)));
+  }
+
+  it("/v0/kt/append：畸形 did 400、负载超限 400", async () => {
+    node = await startDevNode();
+    base = `http://127.0.0.1:${node.port}`;
+    const append = (did: string, payloadBytes: number) =>
+      fetch(`${base}/v0/kt/append`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ did, type: "revoke", payload: Buffer.alloc(payloadBytes, 1).toString("base64") }),
+      });
+    expect((await append("not-a-did", 8)).status).toBe(400);
+    expect((await append(createIdentity().did, 65_537)).status).toBe(400);
+    // 边界内仍可用
+    expect((await append(createIdentity().did, 65_536)).status).toBe(201);
+  });
+
+  it("/v0/kt/append：超速 429（参数注入小值）", async () => {
+    node = await startDevNode({ limits: { ktAppendPerMin: 2 } });
+    base = `http://127.0.0.1:${node.port}`;
+    const did = createIdentity().did;
+    for (let i = 0; i < 2; i++) {
+      const res = await fetch(`${base}/v0/kt/append`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ did, type: "revoke", payload: Buffer.from("x").toString("base64") }),
+      });
+      expect(res.status).toBe(201);
+    }
+    const third = await fetch(`${base}/v0/kt/append`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ did, type: "revoke", payload: Buffer.from("x").toString("base64") }),
+    });
+    expect(third.status).toBe(429);
+  });
+
+  it("设备 PUT：每 DID 超速 429", async () => {
+    node = await startDevNode({ limits: { devicePutPerMin: 2 } });
+    base = `http://127.0.0.1:${node.port}`;
+    const identity = createIdentity();
+    const enc = encodeURIComponent(identity.did);
+    const put = () =>
+      fetch(`${base}/v0/registry/devices/${enc}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ certificate: JSON.parse(makeCertJson(identity)) }),
+      });
+    expect((await put()).status).toBe(201);
+    expect((await put()).status).toBe(201);
+    expect((await put()).status).toBe(429); // 窗口内第 3 次（限流键为 DID）
+  });
+
+  it("设备 PUT：每 DID 设备数上限 429，同 dkId 续期不受限", async () => {
+    node = await startDevNode({ limits: { devicePutPerMin: 100, maxDevicesPerDid: 2 } });
+    base = `http://127.0.0.1:${node.port}`;
+    const identity = createIdentity();
+    const enc = encodeURIComponent(identity.did);
+    const put = (certJson: string) =>
+      fetch(`${base}/v0/registry/devices/${enc}`, {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ certificate: JSON.parse(certJson) }),
+      });
+    const cert1 = makeCertJson(identity);
+    expect((await put(cert1)).status).toBe(201);
+    expect((await put(makeCertJson(identity))).status).toBe(201); // 第 2 台，已满
+    expect((await put(makeCertJson(identity))).status).toBe(429); // 第 3 台（新 dk）被拒
+    expect((await put(cert1)).status).toBe(201); // 同 dkId 续期（覆盖）放行
   });
 });

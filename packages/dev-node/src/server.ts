@@ -58,6 +58,7 @@ import { createPushStore, notifyMailbox, putSubscription, removeSubscription, ty
 
 const MAX_BODY = 16 * 1024 * 1024; // 块大小上限 16MB
 const MAILBOX_MAX_ENTRIES = 1000;
+const KT_MANUAL_MAX_PAYLOAD = 65_536; // 手动 KT 事件负载上限（64KB）
 
 export interface DevNode {
   port: number;
@@ -81,6 +82,8 @@ interface NodeState {
     mailboxAppend: RateLimiter;
     blockPut: RateLimiter;
     register: RateLimiter;
+    ktAppend: RateLimiter;
+    devicePut: RateLimiter;
   };
 }
 
@@ -266,6 +269,8 @@ export function startDevNode(
       mailboxAppend: new RateLimiter(limits.mailboxAppendPerMin, 60_000),
       blockPut: new RateLimiter(limits.blockPutPerMin, 60_000),
       register: new RateLimiter(limits.registerPerMin, 60_000),
+      ktAppend: new RateLimiter(limits.ktAppendPerMin, 60_000),
+      devicePut: new RateLimiter(limits.devicePutPerMin, 60_000),
     },
   };
   replayPersisted(state, state.persistence.load());
@@ -379,11 +384,21 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
         return sendError(res, 400, "DID 格式非法");
       }
       if (req.method === "PUT") {
+        // 限流：按 DID（防单身份定向刷凭证表）
+        if (!state.limiters.devicePut.allow(did)) {
+          return sendError(res, 429, "设备登记过于频繁（节点限流）");
+        }
         const body = await readJson(req);
         if (typeof body.certificate !== "object" || body.certificate === null) {
           return sendError(res, 400, "设备凭证格式非法");
         }
         const json = JSON.stringify(body.certificate);
+        // 每 DID 设备数上限：仅约束新设备登记（同 dkId 续期/覆盖不受限）
+        const incomingDkId = typeof (body.certificate as Record<string, unknown>).dkId === "string" ? ((body.certificate as Record<string, unknown>).dkId as string) : "";
+        const perDid = state.devices.devices.get(did);
+        if (perDid !== undefined && incomingDkId !== "" && !perDid.has(incomingDkId) && perDid.size >= state.limits.maxDevicesPerDid) {
+          return sendError(res, 429, "该 DID 设备数已达上限（maxDevicesPerDid）");
+        }
         const result = registerDevice(state.devices, did, json);
         if (!result.ok) return sendError(res, 400, result.error);
         // KT 联动：设备生命周期锚定透明日志（联系人可本地折叠核验）
@@ -590,13 +605,27 @@ async function handleHttp(state: NodeState, req: IncomingMessage, res: ServerRes
       return sendJson(res, 200, { from, upTo: state.ktlog.leaves.length, leafHashes: leaves });
     }
     if (req.method === "POST" && url.pathname === "/v0/kt/append") {
+      // 限流：手动 append 每次全量重建 Merkle 根（CPU 面），节点全局压速率
+      if (!state.limiters.ktAppend.allow("global")) {
+        return sendError(res, 429, "KT 追加过于频繁（节点限流）");
+      }
       const body = await readJson(req);
+      const did = String(body.did ?? "");
+      try {
+        didToEd25519PublicKey(did);
+      } catch {
+        return sendError(res, 400, "DID 格式非法");
+      }
+      const payload = new Uint8Array(Buffer.from(String(body.payload ?? ""), "base64"));
+      if (payload.length > KT_MANUAL_MAX_PAYLOAD) {
+        return sendError(res, 400, "KT 事件负载过大（上限 65536 字节）");
+      }
       const event = appendEvent(
         state.ktlog,
         {
-          did: String(body.did ?? ""),
+          did,
           type: parseKTType(body.type),
-          payload: new Uint8Array(Buffer.from(String(body.payload ?? ""), "base64")),
+          payload,
         },
         { manual: true },
       );
