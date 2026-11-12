@@ -23,6 +23,7 @@ import { appendEvent, createKTLogStore, ktLogInclusionProof, ktLogRoot, listEven
 import {
   activeDeviceEntries,
   createDeviceRegistryStore,
+  hasDeviceCertificate,
   listDeviceEntries,
   registerDevice,
   revokeDevice,
@@ -87,68 +88,84 @@ interface NodeState {
  * 持久化重放（M3 修复）：按序落 store 重建内存态。记录均为已通过准入的操作事实，
  * 重放不再验签；KT 事件随 register/device-add/device-revoke 一并重建（根链延续）。
  * 信箱追加不触发 relay 通知（重放时无订阅者）。
+ *
+ * 加固（逐条容错 + 幂等）：单条记录畸形/失败只警告跳过，启动绝不因脏记录崩溃；
+ * register/envelope/kt-manual/device-add 重放幂等——快照压缩两步非原子留下的
+ * "新快照 + 未轮转 JSONL" 会使重复记录重放两次，去重后 KT 事件与信箱条数不翻倍。
  */
 function replayPersisted(state: NodeState, records: PersistRecord[]): void {
+  const seenEnvelopeKeys = new Set<string>(); // "mailboxId|nonce"（nonce 为线格式 base64）
+  const seenManualKtKeys = new Set<string>(); // "did|type|base64payload"
   for (const r of records) {
-    switch (r.t) {
-      case "register": {
-        const record = parseUserNameRecord({ record: r.record });
-        registerRecord(state.registry, record);
-        appendEvent(state.ktlog, {
-          did: record.did,
-          type: "register",
-          payload: new Uint8Array(Buffer.from(record.name, "utf8")),
-        });
-        break;
-      }
-      case "device-add": {
-        const result = registerDevice(state.devices, r.did, r.json);
-        if (result.ok) {
-          appendEvent(state.ktlog, { did: r.did, type: "device-add", payload: new Uint8Array(Buffer.from(r.json, "utf8")) });
+    try {
+      switch (r.t) {
+        case "register": {
+          const record = parseUserNameRecord({ record: r.record });
+          const result = registerRecord(state.registry, record);
+          // 重名（重复重放）等失败：跳过 KT 追加，避免事件翻倍
+          if (!result.ok) break;
+          appendEvent(state.ktlog, {
+            did: record.did,
+            type: "register",
+            payload: new Uint8Array(Buffer.from(record.name, "utf8")),
+          });
+          break;
         }
-        break;
-      }
-      case "device-revoke": {
-        const result = revokeDevice(state.devices, r.did, r.json);
-        if (result.ok) {
-          dropDeviceMaterials(state.bundles, r.did, r.dkId);
-          appendEvent(state.ktlog, { did: r.did, type: "device-revoke", payload: new Uint8Array(Buffer.from(r.json, "utf8")) });
+        case "device-add": {
+          // 同一 (did, 凭证原文) 重复重放不重复锚定 KT；不同原文（续期）照常追加
+          if (hasDeviceCertificate(state.devices, r.did, r.json)) break;
+          const result = registerDevice(state.devices, r.did, r.json);
+          if (result.ok) {
+            appendEvent(state.ktlog, { did: r.did, type: "device-add", payload: new Uint8Array(Buffer.from(r.json, "utf8")) });
+          }
+          break;
         }
-        break;
-      }
-      case "bundle":
-        putBundle(state.bundles, r.did, r.dkId, new Uint8Array(Buffer.from(r.bytes, "base64")));
-        break;
-      case "opks":
-        try {
+        case "device-revoke": {
+          const result = revokeDevice(state.devices, r.did, r.json);
+          // 仅首次吊销（changed）落 KT，重复吊销幂等跳过（与写入路径一致）
+          if (result.ok && result.changed) {
+            dropDeviceMaterials(state.bundles, r.did, r.dkId);
+            appendEvent(state.ktlog, { did: r.did, type: "device-revoke", payload: new Uint8Array(Buffer.from(r.json, "utf8")) });
+          }
+          break;
+        }
+        case "bundle":
+          putBundle(state.bundles, r.did, r.dkId, new Uint8Array(Buffer.from(r.bytes, "base64")));
+          break;
+        case "opks":
+          // 超限等异常由整体 try/catch 跳过（与写入路径的准入一致）
           putOpks(state.bundles, r.did, r.dkId, r.opks);
-        } catch {
-          /* 超限等：跳过（与写入路径的准入一致） */
-        }
-        break;
-      case "opk-consume":
-        consumeOpk(state.bundles, r.did, r.dkId, r.opkId);
-        break;
-      case "block":
-        putBlock(state.storage, r.cid, new Uint8Array(Buffer.from(r.bytes, "base64")));
-        break;
-      case "block-delete":
-        deleteBlock(state.storage, r.cid);
-        break;
-      case "envelope": {
-        try {
+          break;
+        case "opk-consume":
+          consumeOpk(state.bundles, r.did, r.dkId, r.opkId);
+          break;
+        case "block":
+          putBlock(state.storage, r.cid, new Uint8Array(Buffer.from(r.bytes, "base64")));
+          break;
+        case "block-delete":
+          deleteBlock(state.storage, r.cid);
+          break;
+        case "envelope": {
+          const nonce = typeof r.envelope?.nonce === "string" ? r.envelope.nonce : "";
+          const envelopeKey = `${r.mailboxId}|${nonce}`;
+          if (seenEnvelopeKeys.has(envelopeKey)) break;
+          seenEnvelopeKeys.add(envelopeKey);
           mailboxAppend(state.storage, r.mailboxId, envelopeFromJson(r.envelope as EnvelopeJson));
-        } catch {
-          /* 畸形记录跳过 */
+          break;
         }
-        break;
+        case "recovery":
+          state.recovery.set(r.did, r.json);
+          break;
+        case "kt-manual": {
+          const manualKey = `${r.did}|${r.type}|${r.payload}`;
+          if (seenManualKtKeys.has(manualKey)) break;
+          seenManualKtKeys.add(manualKey);
+          appendEvent(state.ktlog, { did: r.did, type: parseKTType(r.type), payload: new Uint8Array(Buffer.from(r.payload, "base64")) }, { manual: true });
+          break;
+        }
       }
-      case "recovery":
-        state.recovery.set(r.did, r.json);
-        break;
-      case "kt-manual":
-        appendEvent(state.ktlog, { did: r.did, type: parseKTType(r.type), payload: new Uint8Array(Buffer.from(r.payload, "base64")) }, { manual: true });
-        break;
+    } catch (err) {
+      console.warn("[mychat-dev-node] 跳过畸形持久化记录（启动不受影响）:", err instanceof Error ? err.message : err);
     }
   }
 }

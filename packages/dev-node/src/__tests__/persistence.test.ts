@@ -3,7 +3,7 @@
  * 重启重放后 registry/bundle/OPK/块/信箱/KT 根链全量恢复；
  * 未设置时保持纯内存（原有属性）。
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -235,3 +235,57 @@ function makeEnvelopeLocal(toPseudonym: string): Envelope {
     payload: randomBytes(200),
   };
 }
+
+describe("启动重放容错与幂等（加固）", () => {
+  it("畸形记录（如 register 缺 record 字段）被跳过：节点正常启动，KT/registry 为空", async () => {
+    const lines = [
+      JSON.stringify({ t: "register" }), // 缺 record 字段（语义畸形）
+      JSON.stringify({ t: "bogus" }), // 未知类型（重放直接忽略）
+      "not-json-at-all", // 损坏行（load 层已跳过，双保险）
+    ];
+    writeFileSync(join(dataDir, "node-log.jsonl"), lines.map((l) => `${l}\n`).join(""));
+    node = await startDevNode({ persistDir: dataDir });
+    base = `http://127.0.0.1:${node.port}`;
+
+    const root = (await (await fetch(`${base}/v0/kt/root`)).json()) as { size: number };
+    expect(root.size).toBe(0);
+    expect((await fetch(`${base}/v0/registry/resolve/ghost`)).status).toBe(404);
+  });
+
+  it("快照/JSONL 含重复记录：重放幂等，KT 事件数与信箱条数不翻倍", async () => {
+    node = await startDevNode({ persistDir: dataDir });
+    base = `http://127.0.0.1:${node.port}`;
+
+    const alice = createIdentity();
+    const record = makeUserNameRecord(alice.ikEd.privateKey, "alice_dup", alice.did, 0);
+    await fetch(`${base}/v0/registry/register`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ record: { ...record, signature: Buffer.from(record.signature).toString("base64") } }),
+    });
+    const mailboxId = "dup-mailbox";
+    await fetch(`${base}/v0/storage/mailboxes/${encodeURIComponent(mailboxId)}/append`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ envelope: envelopeToJson(makeEnvelopeLocal(mailboxId)) }),
+    });
+    const oldRoot = ((await (await fetch(`${base}/v0/kt/root`)).json()) as { root: string }).root;
+    await node.close();
+
+    // 模拟"快照 + 未轮转 JSONL"（压缩两步非原子的中间态）：全量记录重写一遍
+    const jsonlPath = join(dataDir, "node-log.jsonl");
+    const original = readFileSync(jsonlPath, "utf8");
+    writeFileSync(jsonlPath, original + original);
+
+    node = await startDevNode({ persistDir: dataDir });
+    base = `http://127.0.0.1:${node.port}`;
+
+    const root = ((await (await fetch(`${base}/v0/kt/root`)).json()) as { root: string; size: number });
+    expect(root.root).toBe(oldRoot); // KT 根不变（事件未翻倍）
+    expect(root.size).toBe(1);
+    const list = (await (await fetch(`${base}/v0/kt/list/${encodeURIComponent(alice.did)}`)).json()) as { events: unknown[] };
+    expect(list.events).toHaveLength(1);
+    const box = (await (await fetch(`${base}/v0/storage/mailboxes/${encodeURIComponent(mailboxId)}`)).json()) as { envelopes: unknown[] };
+    expect(box.envelopes).toHaveLength(1); // 信箱条数不翻倍
+  });
+});

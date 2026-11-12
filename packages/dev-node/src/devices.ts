@@ -106,6 +106,17 @@ export function listDeviceEntries(store: DeviceRegistryStore, did: string): Devi
   return [...(store.devices.get(did)?.values() ?? [])];
 }
 
+/** 指定 DID 名下是否已登记同一凭证原文（重放幂等判定：快照+未轮转 JSONL 的重复记录不重复锚定 KT）。 */
+export function hasDeviceCertificate(store: DeviceRegistryStore, did: string, certificateJson: string): boolean {
+  let dkId: string;
+  try {
+    dkId = decodeDeviceCertificateJson(certificateJson).dkId;
+  } catch {
+    return false; // 畸形凭证交由 registerDevice 的准入给出结果
+  }
+  return store.devices.get(did)?.get(dkId)?.certificate === certificateJson;
+}
+
 export interface ActiveDevice {
   dkId: string;
   certificate: DeviceCertificate;
