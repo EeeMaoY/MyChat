@@ -14,7 +14,7 @@ import { clearAttachmentCache } from "./attachment-cache";
 import { Messaging, groupChatKey, type ChatMessage, type Contact, type FriendRequestItem, type GroupSummary, type MomentItem } from "./messaging";
 import { NodeApi } from "./node-api";
 import { changeVaultPassphrase as changeVaultPassphraseInner, isVaultConfigured, isVaultUnlocked, lockVault, setupVault as setupVaultInner, unlockVault as unlockVaultInner, wrapVault } from "./keyvault";
-import { ensurePushSubscription, updatePushMailboxes } from "./push";
+import { ensurePushSubscription, releasePushSubscription, updatePushMailboxes } from "./push";
 
 export type Phase = "loading" | "welcome" | "creating" | "set-name" | "main" | "locked";
 /** 主区视图：会话（默认）/ 动态时间线（M3-S12）。 */
@@ -154,6 +154,9 @@ export function lockApp(): void {
   messaging = null;
   lockVault();
   clearAttachmentCache(); // 已解密图片不再以 blob URL 存活内存
+  // 注销推送订阅（fire-and-forget）：锁定后节点不再按信箱面唤醒 SW 弹本地通知；
+  // 解锁后 startApp 的 ensurePushSubscription 会自动重建
+  void releasePushSubscription(new NodeApi(nodeBaseUrl()));
   setState({
     phase: kv !== null && state.vaultConfigured ? "locked" : "welcome",
     did: null,

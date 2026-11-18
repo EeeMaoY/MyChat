@@ -55,7 +55,7 @@ export async function updatePushMailboxes(api: NodeApi, mailboxes: string[]): Pr
   }
 }
 
-/** 注销（锁定/退出时调用；尽力而为）。 */
+/** 注销（锁定时由 app 层 fire-and-forget 调用；尽力而为，解锁后 ensurePushSubscription 自动恢复）。 */
 export async function releasePushSubscription(api: NodeApi): Promise<void> {
   try {
     if (currentSubscriptionEndpoint !== null) {
