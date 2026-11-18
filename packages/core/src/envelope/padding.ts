@@ -38,10 +38,13 @@ function readUint32BE(bytes: Uint8Array, offset: number): number {
 }
 
 /**
- * 按负载长度选择最小可容纳档位；超过最大档位（131072）抛错。
+ * 选择最小可容纳档位；超过最大档位（131072）抛错。
  *
- * 判定口径：length ≤ PAD_SIZES[c]（不含 4B 长度头的线路开销；
- * 含头的容量校验由 applyPadding 在落档时执行，payload 不合规即抛错）。
+ * 判定口径：length ≤ PAD_SIZES[c]，length 指**含 4B 长度头的线格式总长**
+ * （即 wire.length + 4，现有唯一调用方 messaging.ts 的用法）。此口径下边界
+ * 恰好一致：wire ≤ 252B → 传 ≤256 → 档 0，applyPadding 容量 252B 刚好容纳。
+ * 若误传不含头的 payload 长度，253-256B 区间会"选档 0 成功但落档抛错"
+ * （fail-fast，无静默损坏）。
  */
 export function padClassForLength(length: number): PadClass {
   if (!Number.isSafeInteger(length) || length < 0) {

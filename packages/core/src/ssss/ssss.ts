@@ -6,8 +6,10 @@
  * 不涉及密码学假设与原语设计；正确性由属性测试完备覆盖（任意合格子集重组、
  * 任意不合格子集信息论不可恢复、校验和防错片）。
  *
- * 每个分片携带 HMAC-SHA256 校验（密钥 = SHA-256(secret || x)），错片/坏片在
- * 重组前即被拒绝——防止恶意分片注入导致重组出错误密钥且不可察觉。
+ * 每个分片携带错片检测校验和（BLAKE3(x||y) 前 4B，无密钥）——意外损坏/坏片在
+ * 重组前即被拒绝。注意：校验和未密钥化，攻击者可为自己注入的分片自由计算合法
+ * 校验和，**防恶意注入不在此层**——由恢复协议层承担：分片经 ECIES 封装到守护者
+ * IK（来源绑定）+ 编排层入队校验去重（客户端 recovery-share 处理，v0.2.1 加固）。
  */
 import { base58Decode, base58Encode, bytesEqual, concatBytes } from "../codec/index.ts";
 import { blake3Hash, randomBytes } from "../crypto/index.ts";
@@ -34,7 +36,7 @@ function gfInv(a: number): number {
   return GF_EXP[255 - GF_LOG[a]!]!;
 }
 
-/** 单字节分片格式：[x(1B)][y(1B)][hmac-truncated(4B)]，secret 每字节独立成片组。 */
+/** 分片线格式：[x(1B)][y 每字节一个分片…][checksum(x||y) 前 4B]，secret 每字节独立成片组。 */
 export interface Share {
   /** 分片索引 1..255（0 保留） */
   x: number;
