@@ -22,10 +22,15 @@ const SALT_KEY = "vault-salt";
 const VERIFIER_KEY = "vault-verifier";
 const VERIFIER_PLAINTEXT = "mychat-vault-v1";
 const VAULT_FORMAT = 1;
+/** 改钥迁移标记：存在即"上次改钥未确认完成"，值为改钥前的 salt/verifier 快照。 */
+const REKEY_PENDING_KEY = "vault-rekey-pending";
+/** 改钥期间旧密文的影子备份键前缀（改钥未确认前被覆盖的键可由此恢复）。 */
+const REKEY_BACKUP_PREFIX = "vault-rekey-bak:";
 
-/** 明文白名单：无敏感字段的路由/设置数据 + 密钥库自身元数据（盐与 verifier 均非秘密）。 */
-const PLAINTEXT_KEYS = new Set(["msgseq", "my-name", SALT_KEY, VERIFIER_KEY]);
-const PLAINTEXT_PREFIXES = ["cursor:", "setting:"];
+/** 明文白名单：无敏感字段的路由/设置数据 + 密钥库自身元数据（盐与 verifier 均非秘密；
+ * 标记与影子备份须锁定态直通可读写，且均为密文形态或非秘密元数据）。 */
+const PLAINTEXT_KEYS = new Set(["msgseq", "my-name", SALT_KEY, VERIFIER_KEY, REKEY_PENDING_KEY]);
+const PLAINTEXT_PREFIXES = ["cursor:", "setting:", REKEY_BACKUP_PREFIX];
 
 function isPlaintextKey(key: string): boolean {
   if (PLAINTEXT_KEYS.has(key)) return true;
@@ -76,39 +81,150 @@ export async function setupVault(kv: KVStore, passphrase: string): Promise<void>
   await migrateAll(kv);
 }
 
-/** 解锁：派生 KEK 并以 verifier 试解。成功后 KEK 常驻内存直至锁定。 */
+// ---------- 改钥两阶段提交（崩溃可恢复） ----------
+
+/** 迁移标记内容（明文 JSON：旧 salt/verifier 快照，均非秘密——verifier 本就是密文形态）。 */
+interface RekeyPendingRecord {
+  v: 1;
+  /** 改钥前的 salt（base64 文本，即 SALT_KEY 的原始值） */
+  oldSalt: string;
+  /** 改钥前的 verifier（envelope JSON 文本，即 VERIFIER_KEY 的原始值） */
+  oldVerifier: string;
+}
+
+/** 读取迁移标记（不存在或损坏返回 null）。 */
+async function readRekeyPending(kv: KVStore): Promise<RekeyPendingRecord | null> {
+  const raw = await kv.get(REKEY_PENDING_KEY);
+  if (raw === undefined) return null;
+  try {
+    const parsed = JSON.parse(bytesToUtf8(raw)) as Record<string, unknown>;
+    if (parsed.v !== 1 || typeof parsed.oldSalt !== "string" || typeof parsed.oldVerifier !== "string") {
+      return null;
+    }
+    return { v: 1, oldSalt: parsed.oldSalt, oldVerifier: parsed.oldVerifier };
+  } catch {
+    return null;
+  }
+}
+
+/** 删除全部影子备份键（幂等）。 */
+async function deleteRekeyBackups(kv: KVStore): Promise<void> {
+  for (const key of await kv.keys(REKEY_BACKUP_PREFIX)) await kv.delete(key);
+}
+
+/** verifier 试解（AEAD 认证失败/格式错误均视为不匹配）。 */
+function verifierMatches(kekKey: Uint8Array, verifierRaw: Uint8Array): boolean {
+  try {
+    return bytesToUtf8(decryptValue(kekKey, parseEnvelope(verifierRaw))) === VERIFIER_PLAINTEXT;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 解锁：派生 KEK 并以 verifier 试解。成功后 KEK 常驻内存直至锁定。
+ *
+ * 崩溃恢复（上次改钥中断、迁移标记仍在时）：
+ * - 旧口令可解旧 verifier → 回滚：影子备份恢复被覆盖的键、还原旧 salt/verifier、清场，
+ *   之后按旧口令正常解锁（改钥视为未发生）；
+ * - 新口令可解当前 verifier 但切换未确认 → 拒绝并引导用旧口令（键可能仍为旧密文或混合态）。
+ */
 export async function unlockVault(kv: KVStore, passphrase: string): Promise<void> {
   const salt = await readSalt(kv);
   if (salt === null) throw new Error("密钥库未配置");
-  const candidate = deriveKekFromPassphrase(passphrase, salt);
   const verifierRaw = await kv.get(VERIFIER_KEY);
   if (verifierRaw === undefined) throw new Error("密钥库未配置");
-  try {
-    const decrypted = decryptValue(candidate, parseEnvelope(verifierRaw));
-    if (bytesToUtf8(decrypted) !== VERIFIER_PLAINTEXT) throw new Error("mismatch");
-  } catch {
-    throw new WrongPassphraseError();
+  const candidate = deriveKekFromPassphrase(passphrase, salt);
+  const pending = await readRekeyPending(kv);
+  if (verifierMatches(candidate, verifierRaw)) {
+    if (pending !== null && bytesToUtf8(verifierRaw) === pending.oldVerifier) {
+      // 崩溃于切换之前（或回滚半程）：键仍为旧密文，清理残留影子与标记后正常解锁
+      await deleteRekeyBackups(kv);
+      await kv.delete(REKEY_PENDING_KEY);
+    } else if (pending !== null) {
+      // 崩溃于切换之后、确认之前：键仍为旧密文或新旧行混合，新口令不可用
+      throw new Error("上次修改口令未完成：请先用修改前的旧口令解锁（将自动回滚）");
+    } else {
+      // 正常路径：顺手清理"确认后影子删除中断"的残留
+      await deleteRekeyBackups(kv);
+    }
+    kek = candidate;
+    return;
   }
-  kek = candidate;
+  if (pending !== null) {
+    const oldKek = deriveKekFromPassphrase(passphrase, base64Decode(pending.oldSalt));
+    if (verifierMatches(oldKek, utf8ToBytes(pending.oldVerifier))) {
+      // 崩溃于切换之中：用影子里的旧密文恢复被覆盖的键，还原旧 salt/verifier 后按旧口令解锁。
+      // 恢复写入须绕过包裹层（锁定态 kek=null 直通；此处再显式置空防已解锁状态下重复调用）
+      kek = null;
+      for (const bakKey of await kv.keys(REKEY_BACKUP_PREFIX)) {
+        const bak = await kv.get(bakKey);
+        if (bak !== undefined) await kv.put(bakKey.slice(REKEY_BACKUP_PREFIX.length), bak);
+      }
+      await kv.put(SALT_KEY, utf8ToBytes(pending.oldSalt));
+      await kv.put(VERIFIER_KEY, utf8ToBytes(pending.oldVerifier));
+      await deleteRekeyBackups(kv);
+      await kv.delete(REKEY_PENDING_KEY);
+      kek = oldKek;
+      return;
+    }
+  }
+  throw new WrongPassphraseError();
 }
 
-/** 修改口令：旧口令验证 → 以旧 KEK 解出全部敏感键明文 → 换新 KEK 重加密写入。 */
+/**
+ * 修改口令（两阶段提交，崩溃可恢复）：
+ * - 阶段 A（内存，磁盘未动）：旧口令验证 → 解出全部敏感键明文 → 预生成
+ *   旧/新两组密文（影子备份 = 旧 KEK 重加密；新密文 = 新 KEK 加密）与新 salt/verifier/标记。
+ * - 阶段 B（落盘切换）：写迁移标记 → 写影子备份 → 写新 salt/verifier → 逐键写新密文
+ *   → 删除标记（提交点）→ 删除影子。全程直通写预生成字节，任何一步中断都留下
+ *   "标记在 + 每个被覆盖键均有旧密文影子"的可回滚状态（unlock 时自动回滚，旧口令数据无损）。
+ */
 export async function changeVaultPassphrase(kv: KVStore, oldPassphrase: string, newPassphrase: string): Promise<void> {
-  await unlockVault(kv, oldPassphrase); // 失败即抛（kek 只在成功时更新；此刻 kek = 旧 KEK）
   if (newPassphrase.length < 8) throw new Error("口令至少 8 位");
-  // 先用旧 KEK 解出全部敏感键（get 自动解密）
+  // 旧口令验证（上次改钥中断时先自动回滚清场）；成功后 kek = 旧 KEK
+  await unlockVault(kv, oldPassphrase);
+  const oldKek = kek;
+  if (oldKek === null) throw new VaultLockedError();
+
+  // —— 阶段 A：内存预备（磁盘未动，任一步失败直接抛出）——
   const snapshot = new Map<string, Uint8Array>();
   for (const key of await kv.keys("")) {
     if (isPlaintextKey(key)) continue;
     const value = await kv.get(key);
     if (value !== undefined) snapshot.set(key, value);
   }
-  // 再切换 KEK 并重加密写入
-  const salt = randomBytes(PASSPHRASE_SALT_LENGTH);
-  kek = deriveKekFromPassphrase(newPassphrase, salt);
-  await kv.put(SALT_KEY, utf8ToBytes(base64Encode(salt)));
-  await kv.put(VERIFIER_KEY, encryptUtf8(VERIFIER_PLAINTEXT));
-  for (const [key, value] of snapshot) await kv.put(key, value);
+  const oldSaltRaw = await kv.get(SALT_KEY);
+  const oldVerifierRaw = await kv.get(VERIFIER_KEY);
+  if (oldSaltRaw === undefined || oldVerifierRaw === undefined) throw new Error("密钥库元数据缺失");
+  const newSalt = randomBytes(PASSPHRASE_SALT_LENGTH);
+  const newKek = deriveKekFromPassphrase(newPassphrase, newSalt);
+  const backups = new Map<string, Uint8Array>();
+  const newCiphers = new Map<string, Uint8Array>();
+  for (const [key, plain] of snapshot) {
+    backups.set(key, encryptValue(oldKek, plain));
+    newCiphers.set(key, encryptValue(newKek, plain));
+  }
+  const pendingValue = utf8ToBytes(
+    JSON.stringify({ v: 1, oldSalt: bytesToUtf8(oldSaltRaw), oldVerifier: bytesToUtf8(oldVerifierRaw) } satisfies RekeyPendingRecord),
+  );
+
+  // —— 阶段 B：落盘切换（kek 置空令包裹层直通，预生成字节原样落盘）——
+  kek = null;
+  try {
+    await kv.put(REKEY_PENDING_KEY, pendingValue);
+    for (const [key, backup] of backups) await kv.put(REKEY_BACKUP_PREFIX + key, backup);
+    await kv.put(SALT_KEY, utf8ToBytes(base64Encode(newSalt)));
+    await kv.put(VERIFIER_KEY, encryptValue(newKek, utf8ToBytes(VERIFIER_PLAINTEXT)));
+    for (const [key, cipher] of newCiphers) await kv.put(key, cipher);
+    await kv.delete(REKEY_PENDING_KEY); // 提交点：标记删除后改钥即完成
+    await deleteRekeyBackups(kv);
+  } catch (err) {
+    // 落盘中断：内存 KEK 与磁盘形态可能不一致，强制锁定走解锁回滚
+    lockVault();
+    throw err;
+  }
+  kek = newKek;
 }
 
 /** 迁移/重加密全部非白名单键（读原值 → 以当前 KEK 重写）。 */

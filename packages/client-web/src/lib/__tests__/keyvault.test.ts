@@ -122,5 +122,88 @@ describe("密钥库（W1 加密存储）", () => {
     await unlockVault(store, "new-pass-456");
     expect(bytesToUtf8((await store.get("identity"))!)).toBe("my-secret");
     await expect(unlockVault(store, "old-pass-123")).rejects.toBeInstanceOf(WrongPassphraseError);
+    // 成功路径不残留迁移标记与影子备份
+    expect(inner.raw.has("vault-rekey-pending")).toBe(false);
+    expect([...inner.raw.keys()].some((k) => k.startsWith("vault-rekey-bak:"))).toBe(false);
   });
+});
+
+describe("修改口令崩溃安全（两阶段提交）", () => {
+  /** 在包裹层外再包一层计数代理：第 failAt 次写操作（put/delete）抛错，模拟落盘中途崩溃。 */
+  function crashAtWrite(store: KVStore, failAt: number): KVStore {
+    let writes = 0;
+    const boom = (): never => {
+      throw new Error(`模拟崩溃：第 ${failAt} 次写入`);
+    };
+    return {
+      ...store,
+      async put(key, value) {
+        writes += 1;
+        if (writes === failAt) boom();
+        return store.put(key, value);
+      },
+      async delete(key) {
+        writes += 1;
+        if (writes === failAt) boom();
+        return store.delete(key);
+      },
+    };
+  }
+
+  /**
+   * 阶段 B 的写操作序列（3 个敏感键）：
+   * 1 标记 → 2-4 影子备份 → 5 新 salt → 6 新 verifier → 7-9 新密文
+   * → 10 删标记（提交点）→ 11-13 删影子。
+   * 任意一次崩溃后：提交点之前（1-10）旧口令解锁自动回滚且数据无损；
+   * 提交点之后（11-13，仅剩影子清理）新口令生效、旧口令失效。
+   */
+  it("任意一次落盘写入崩溃 → 解锁可恢复且数据无损", async () => {
+    const TOTAL_WRITES = 13;
+    for (let failAt = 1; failAt <= TOTAL_WRITES; failAt++) {
+      const inner = await seededKV(); // 3 个敏感键：identity/spk/contact:did:mychat:x
+      const store = wrapVault(inner);
+      await setupVault(store, "old-pass-123");
+
+      await expect(changeVaultPassphrase(crashAtWrite(store, failAt), "old-pass-123", "new-pass-456")).rejects.toThrow(
+        "模拟崩溃",
+      );
+
+      lockVault();
+      if (failAt <= 10) {
+        // 提交点之前崩溃：改钥视为未发生，旧口令解锁自动回滚
+        await unlockVault(store, "old-pass-123");
+        expect(bytesToUtf8((await store.get("identity"))!)).toContain("明文身份");
+        expect(bytesToUtf8((await store.get("spk"))!)).toContain("bb");
+        expect(bytesToUtf8((await store.get("contact:did:mychat:x"))!)).toContain("老朋友");
+      } else {
+        // 提交点之后崩溃（仅影子清理中断）：改钥已生效
+        await expect(unlockVault(store, "old-pass-123")).rejects.toBeInstanceOf(WrongPassphraseError);
+        await unlockVault(store, "new-pass-456");
+        expect(bytesToUtf8((await store.get("identity"))!)).toContain("明文身份");
+      }
+      // 回滚/清理后不残留迁移标记与影子备份
+      expect(inner.raw.has("vault-rekey-pending")).toBe(false);
+      expect([...inner.raw.keys()].some((k) => k.startsWith("vault-rekey-bak:"))).toBe(false);
+    }
+  }, 120_000);
+
+  it("崩溃于切换后：新口令被明确拒绝并引导旧口令；回滚后新口令失效", async () => {
+    const inner = await seededKV();
+    const store = wrapVault(inner);
+    await setupVault(store, "old-pass-123");
+
+    // failAt=7：新 salt/verifier 已写、第一个新密文未写（键仍全为旧密文）
+    await expect(changeVaultPassphrase(crashAtWrite(store, 7), "old-pass-123", "new-pass-456")).rejects.toThrow("模拟崩溃");
+
+    lockVault();
+    await expect(unlockVault(store, "new-pass-456")).rejects.toThrow("上次修改口令未完成");
+    // 旧口令解锁：自动回滚为改钥前状态
+    await unlockVault(store, "old-pass-123");
+    expect(bytesToUtf8((await store.get("spk"))!)).toContain("bb");
+    // 回滚后新口令失效（改钥视为未发生）
+    lockVault();
+    await expect(unlockVault(store, "new-pass-456")).rejects.toBeInstanceOf(WrongPassphraseError);
+    await unlockVault(store, "old-pass-123");
+    expect(bytesToUtf8((await store.get("identity"))!)).toContain("明文身份");
+  }, 30_000);
 });
