@@ -7,7 +7,7 @@
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
-import { WebSocketServer, type WebSocket } from "ws";
+import { WebSocket, WebSocketServer } from "ws";
 
 import type { KTEvent, UserNameRecord } from "@mychat/core";
 import {
@@ -154,7 +154,7 @@ function replayPersisted(state: NodeState, records: PersistRecord[]): void {
           const envelopeKey = `${r.mailboxId}|${nonce}`;
           if (seenEnvelopeKeys.has(envelopeKey)) break;
           seenEnvelopeKeys.add(envelopeKey);
-          mailboxAppend(state.storage, r.mailboxId, envelopeFromJson(r.envelope as EnvelopeJson));
+          mailboxAppend(state.storage, r.mailboxId, envelopeFromJson(r.envelope));
           break;
         }
         case "recovery":
@@ -353,7 +353,7 @@ export function startDevNode(
       for (const mailboxId of mailboxIds) {
         state.relay.subscribe(mailboxId, ws as WebSocket);
       }
-      ws.send(JSON.stringify({ type: "mailbox-activity", mailboxId: mailboxIds[0] } satisfies RelayNotification));
+      ws.send(JSON.stringify({ type: "mailbox-activity", mailboxId: mailboxIds[0]! } satisfies RelayNotification)); // 上游已拒空数组，[0] 必存在
     });
   });
 

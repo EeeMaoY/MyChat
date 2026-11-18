@@ -201,8 +201,8 @@ interface Party {
   sessions: Map<string, Session>;
 }
 
-/** 发起方与响应方握手；返回双方视角会话（响应方按 IK-x 匹配最新信封、消耗 OPK、替换会话）。 */
-async function handshake(initiator: Party, responder: Party, firstText: string): Promise<{ initiatorSession: Session; responderSession: Session }> {
+/** 发起方与响应方握手；返回双方视角会话（响应方按 IK-x 匹配最新信封、消耗 OPK、替换会话）。发起方仅需身份。 */
+async function handshake(initiator: Pick<Party, "identity">, responder: Party, firstText: string): Promise<{ initiatorSession: Session; responderSession: Session }> {
   const bundle = decodePreKeyBundle(await fetchBundleBytes(responder.identity.did));
   const { session, wire } = initiateSession(initiator.identity, bundle, utf8ToBytes(firstText));
   const mailbox = `discovery-${responder.identity.did}`;
@@ -222,6 +222,7 @@ async function handshake(initiator: Party, responder: Party, firstText: string):
   }
   if (!matched) throw new Error("握手信封未找到");
   const msg = decodeSessionWire(matched);
+  if (msg.kind !== 1) throw new Error("信箱内无初始握手消息");
   const usedId = msg.x3dh.opkId;
   const opkKey = responder.prekeys.pool.get(usedId);
   if (!opkKey) {

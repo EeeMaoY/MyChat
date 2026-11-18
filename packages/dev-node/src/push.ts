@@ -19,11 +19,20 @@ import { createRequire } from "node:module";
 const requireCjs = createRequire(import.meta.url);
 const webpush = requireCjs("web-push") as typeof import("web-push");
 
+/**
+ * web-push 无自带类型声明（namespace 引用在 tsc 下报 TS2503）——
+ * 本地定义无 payload push 所需的最小订阅结构（与 W3C PushSubscriptionJSON 子集对齐）。
+ */
+export interface WebPushSubscription {
+  endpoint: string;
+  keys: { p256dh: string; auth: string };
+}
+
 export interface PushSubscriptionRecord {
   /** 浏览器推送服务分配的订阅端点（唯一键） */
   endpoint: string;
   /** 原始订阅（keys.p256dh/auth 用于协议握手；无 payload push 仍需合法结构） */
-  subscription: webpush.PushSubscription;
+  subscription: WebPushSubscription;
   /** 该设备关注的信箱伪地址（与客户端 startRealtime 的订阅面一致） */
   mailboxes: string[];
 }
@@ -33,7 +42,7 @@ export interface PushStore {
   subscriptions: Map<string, PushSubscriptionRecord>;
   vapid: { publicKey: string; privateKey: string };
   /** 发送实现（默认 web-push；测试可注入 spy/桩） */
-  sender?: (subscription: webpush.PushSubscription, vapidDetails: { publicKey: string; privateKey: string; subject: string }) => Promise<void>;
+  sender?: (subscription: WebPushSubscription, vapidDetails: { publicKey: string; privateKey: string; subject: string }) => Promise<void>;
 }
 
 /** 载入或生成 VAPID 密钥：数据目录持久化（跨重启稳定）；无目录则内存生成。 */
@@ -100,7 +109,7 @@ export interface PushResult {
 }
 
 /** 登记/更新订阅（幂等；mailboxes 覆盖——信箱面变化时客户端整体重发）。 */
-export function putSubscription(store: PushStore, subscription: webpush.PushSubscription, mailboxes: string[]): void {
+export function putSubscription(store: PushStore, subscription: WebPushSubscription, mailboxes: string[]): void {
   store.subscriptions.set(subscription.endpoint, { endpoint: subscription.endpoint, subscription, mailboxes });
 }
 

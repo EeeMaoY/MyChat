@@ -191,7 +191,9 @@ async function handshake(initiator: Party, responder: Party, firstText: string):
     }
   }
   if (!matched) throw new Error("握手信封未找到");
-  const usedId = decodeSessionWire(matched).x3dh.opkId;
+  const msg = decodeSessionWire(matched);
+  if (msg.kind !== 1) throw new Error("信箱内无初始握手消息");
+  const usedId = msg.x3dh.opkId;
   const opkKey = responder.prekeys.pool.get(usedId);
   if (!opkKey) throw new Error(`OPK #${usedId} 不在本地池`);
   const { session: sessionB } = acceptSession(

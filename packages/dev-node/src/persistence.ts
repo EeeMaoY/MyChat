@@ -16,6 +16,8 @@
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
 
+import type { EnvelopeJson } from "./wire.ts";
+
 export type PersistRecord =
   | { t: "register"; record: Record<string, unknown> }
   | { t: "device-add"; did: string; json: string }
@@ -25,7 +27,7 @@ export type PersistRecord =
   | { t: "opk-consume"; did: string; dkId: string; opkId: number }
   | { t: "block"; cid: string; bytes: string }
   | { t: "block-delete"; cid: string }
-  | { t: "envelope"; mailboxId: string; envelope: Record<string, unknown> }
+  | { t: "envelope"; mailboxId: string; envelope: EnvelopeJson }
   | { t: "recovery"; did: string; json: string }
   | { t: "kt-manual"; did: string; type: string; payload: string };
 

@@ -11,6 +11,8 @@ import { join } from "node:path";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+import type { PushStore } from "../push.ts";
+
 import { startDevNode, type DevNode } from "../server";
 import { randomBytes, type Envelope } from "@mychat/core";
 import { envelopeToJson } from "../wire";
@@ -59,7 +61,7 @@ describe("Web Push 网关（M4-S15）", () => {
   it("订阅登记 → 关注信箱 append 触发无 payload 投递；无关信箱不投递", async () => {
     node = await startDevNode({ persistDir: (dataDir = mkdtempSync(join(tmpdir(), "mychat-push-"))) });
     base = `http://127.0.0.1:${node.port}`;
-    const sender = vi.fn(async () => undefined);
+    const sender = vi.fn<NonNullable<PushStore["sender"]>>(async () => undefined);
     node.push.sender = sender;
 
     const vapid = await fetch(`${base}/v0/push/vapid`);
@@ -81,7 +83,7 @@ describe("Web Push 网关（M4-S15）", () => {
   it("mailboxes 覆盖更新与注销", async () => {
     node = await startDevNode({});
     base = `http://127.0.0.1:${node.port}`;
-    const sender = vi.fn(async () => undefined);
+    const sender = vi.fn<NonNullable<PushStore["sender"]>>(async () => undefined);
     node.push.sender = sender;
     await subscribe(["mailbox-a"]);
     await subscribe(["mailbox-c"]); // 同 endpoint 覆盖
