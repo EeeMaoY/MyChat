@@ -5,7 +5,6 @@
 import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from "react";
 
 import {
-  changeVaultPassphrase,
   createCustodyBackup,
   exportAllData,
   getMyDevice,
@@ -27,6 +26,7 @@ import {
 
 import { NAME_RE, shortDid } from "./format";
 import Modal from "./Modal";
+import PassphraseModal from "./PassphraseModal";
 
 interface Props {
   onClose: () => void;
@@ -94,7 +94,8 @@ export default function ProfileModal({ onClose, onSetupPassphrase }: Props) {
   const [revokeTarget, setRevokeTarget] = useState<string | null>(null);
   const [revokePending, setRevokePending] = useState(false);
   const [circleResetPending, setCircleResetPending] = useState(false);
-  const [passPending, setPassPending] = useState(false);
+  /** 修改口令子弹窗（PassphraseModal 修改模式：旧口令 + 双输入确认）。 */
+  const [showChangePass, setShowChangePass] = useState(false);
 
   useEffect(() => {
     let alive = true;
@@ -315,6 +316,7 @@ export default function ProfileModal({ onClose, onSetupPassphrase }: Props) {
   const showGuardianSetup = !selfLoaded || recoverySelf === null || editingGuardians;
 
   return (
+    <>
     <Modal title="我" onClose={onClose}>
       {/* 用户名 */}
       {state.myName !== null ? (
@@ -441,20 +443,7 @@ export default function ProfileModal({ onClose, onSetupPassphrase }: Props) {
       <div className="inline-row data-row">
         {state.vaultConfigured ? (
           <>
-            <button
-              className="btn-ghost"
-              disabled={passPending}
-              onClick={async () => {
-                const oldPass = window.prompt("输入当前口令");
-                if (oldPass === null) return;
-                const newPass = window.prompt("输入新口令（至少 8 位）");
-                if (newPass === null) return;
-                setPassPending(true);
-                const err = await changeVaultPassphrase(oldPass, newPass);
-                setPassPending(false);
-                setNotice(err ?? "口令已修改，本地数据已重新加密");
-              }}
-            >
+            <button className="btn-ghost" onClick={() => setShowChangePass(true)}>
               修改口令
             </button>
             <button className="btn-ghost" onClick={() => lockApp()}>
@@ -634,5 +623,14 @@ export default function ProfileModal({ onClose, onSetupPassphrase }: Props) {
         <p className="field-hint">留空恢复默认节点；修改后需刷新页面生效。</p>
       </form>
     </Modal>
+    {/* 修改口令子弹窗（与 Modal 平级渲染：避免遮罩点击事件冒泡误关外层弹窗） */}
+    {showChangePass && (
+      <PassphraseModal
+        initialSetup={false}
+        onClose={() => setShowChangePass(false)}
+        onSuccess={() => setNotice("口令已修改，本地数据已重新加密")}
+      />
+    )}
+    </>
   );
 }

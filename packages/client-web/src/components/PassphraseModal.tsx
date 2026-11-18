@@ -12,9 +12,11 @@ interface Props {
   /** false = 修改模式（需旧口令） */
   initialSetup: boolean;
   onClose: () => void;
+  /** 设置/修改成功后回调（先于 onClose；成功提示文案由装配方决定）。 */
+  onSuccess?: () => void;
 }
 
-export default function PassphraseModal({ initialSetup, onClose }: Props) {
+export default function PassphraseModal({ initialSetup, onClose, onSuccess }: Props) {
   const [oldPass, setOldPass] = useState("");
   const [pass, setPass] = useState("");
   const [confirm, setConfirm] = useState("");
@@ -40,6 +42,7 @@ export default function PassphraseModal({ initialSetup, onClose }: Props) {
       setError(err);
       return;
     }
+    onSuccess?.();
     onClose();
   }
 
