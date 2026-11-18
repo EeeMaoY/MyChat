@@ -77,9 +77,9 @@ function GroupMemberList(props: {
   contactName: (did: string) => string;
 }) {
   const state = useAppState();
-  // 成员明细经全局状态下发（app.ts 的 groups 快照扩展 members）
+  // 成员明细经全局状态下发（app.ts 的 groups 快照已扩展 GroupSummary.members）
   const group = state.groups.find((g) => g.groupId === props.groupId);
-  const members = (group as unknown as { members?: { did: string; role: string }[] })?.members ?? [];
+  const members = group?.members ?? [];
   const myDid = state.did;
   const amOwner = group?.amOwner === true;
 

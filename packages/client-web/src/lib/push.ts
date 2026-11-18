@@ -8,7 +8,7 @@
  * 边界（如实登记）：通知内容为固定文案（无 payload push，隐私优先）；
  * Chrome/Edge 要求 HTTPS 或 localhost；iOS Safari 需 PWA 安装。
  */
-import { fromBase64, toBase64 } from "./base64";
+import { fromBase64 } from "./base64";
 import type { NodeApi } from "./node-api";
 
 let currentSubscriptionEndpoint: string | null = null;
@@ -73,5 +73,3 @@ function urlBase64ToUint8Array(base64url: string): Uint8Array {
   const raw = fromBase64(padded + "=".repeat((4 - (padded.length % 4)) % 4));
   return raw;
 }
-
-void toBase64;

@@ -1832,14 +1832,13 @@ export class Messaging {
 
   /** 发起恢复请求（新机/临时身份视角）：向守护者请求分片回传。 */
   async sendRecoveryRequest(ownerDid: string): Promise<void> {
-    for (const [did, session] of this.sessions) {
+    for (const session of this.sessions.values()) {
       const wire = sessionSend(
         session,
         utf8ToBytes(JSON.stringify({ v: 1, type: "recovery-request", did: ownerDid } satisfies SessionPayload)),
       );
       const mailboxId = sessionMailbox(session, "send", Date.now());
       await this.deps.api.mailboxAppend(mailboxId, this.seal(wire, mailboxId));
-      void did;
     }
     this.emit();
   }
@@ -1938,7 +1937,7 @@ export class Messaging {
     checks.push({ name: "身份包裹块可达", ok: wrapOk, detail: wrapOk ? "" : "节点上无法取回包裹块" });
     // KT 日志完整性（加固批次 ④）：我名下事件的包含性证明逐条核验
     const kt = await this.verifyKTIntegrity();
-    checks.push({ name: "KT 日志完整性", ok: kt.ok, detail: kt.ok ? kt.detail : kt.detail });
+    checks.push({ name: "KT 日志完整性", ok: kt.ok, detail: kt.detail });
     for (const g of self.guardians) {
       const inContacts = this.contacts.has(g);
       checks.push({ name: `守护者会话有效（${g.slice(11, 22)}…）`, ok: inContacts, detail: inContacts ? "" : "该守护者不在联系人中，恢复时无法联系" });
@@ -2124,8 +2123,8 @@ export class Messaging {
 
     try {
       // M2-S9：以全池 OPK 参与接受（任一匹配即可）；成功后消耗对应 OPK 并低水位补充
-      const opkPool = new Map([...this.opkPool.entries()].map(([id, kp]) => [id, kp]));
-      const { session, plaintext } = acceptSession(this.identity, this.spk, opkPool, wire);
+      // （acceptSession 只读池不改动，消耗由下方 this.opkPool.delete 完成，无需浅拷贝）
+      const { session, plaintext } = acceptSession(this.identity, this.spk, this.opkPool, wire);
       const usedOpkId = msg.x3dh.opkId;
       if (this.opkPool.delete(usedOpkId)) {
         await this.persistOpkPool();

@@ -7,8 +7,6 @@ import { expect, test, type Browser, type Page } from "@playwright/test";
 
 import { NODE_URL } from "../playwright.config";
 
-const NAME_RE = /^[A-Za-z0-9_-]+$/;
-
 /** 打开一个新用户页面（独立 context，指向测试 dev-node），完成无感创建 + 起名。 */
 async function newUser(browser: Browser, name: string): Promise<Page> {
   const context = await browser.newContext();
@@ -139,7 +137,6 @@ test("口令锁屏：设置口令 → 立即锁定 → 解锁恢复", async ({ b
   await expect(page.locator(".profile-name")).toContainText("e2e_alice5");
 });
 
-void NAME_RE;
 
 test("群主转让与改名：转让后新群主可管理，改名全员可见", async ({ browser }) => {
   const alice = await newUser(browser, "e2e_alice6");
