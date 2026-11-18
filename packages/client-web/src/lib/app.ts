@@ -9,6 +9,8 @@ import { useSyncExternalStore } from "react";
 
 import { createIdbKVStore, base58Decode, decryptAttachment, type KVStore } from "@mychat/core";
 
+import { clearAttachmentCache } from "./attachment-cache";
+
 import { Messaging, groupChatKey, type ChatMessage, type Contact, type FriendRequestItem, type GroupSummary, type MomentItem } from "./messaging";
 import { NodeApi } from "./node-api";
 import { changeVaultPassphrase as changeVaultPassphraseInner, isVaultConfigured, isVaultUnlocked, lockVault, setupVault as setupVaultInner, unlockVault as unlockVaultInner, wrapVault } from "./keyvault";
@@ -144,13 +146,14 @@ export async function unlockApp(passphrase: string): Promise<boolean> {
   return true;
 }
 
-/** 立即锁定：丢弃 KEK 与全部内存态（含 Messaging 实例），回到锁屏。 */
+/** 立即锁定：丢弃 KEK 与全部内存态（含 Messaging 实例与已解密附件缓存），回到锁屏。 */
 export function lockApp(): void {
   assembleEpoch += 1; // 作废进行中的 startApp 装配（其 await 间隙检测到即退出）
   stopAutoLock();
   messaging?.stopRealtime();
   messaging = null;
   lockVault();
+  clearAttachmentCache(); // 已解密图片不再以 blob URL 存活内存
   setState({
     phase: kv !== null && state.vaultConfigured ? "locked" : "welcome",
     did: null,

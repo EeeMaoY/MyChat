@@ -2,12 +2,10 @@
 import { useEffect, useState } from "react";
 
 import { fetchAttachment, setNotice } from "../lib/app";
+import { cacheObjectUrl, getCachedObjectUrl } from "../lib/attachment-cache";
 import type { AttachmentMeta } from "../lib/messaging";
 
 import { formatBytes } from "./format";
-
-/** cid → objectURL 模块级缓存：同一附件只取块解密一次（图片与下载共享）。 */
-const objectUrlCache = new Map<string, string>();
 
 /**
  * 允许以顶层文档在新标签页打开的位图 MIME 白名单。
@@ -26,9 +24,9 @@ type ImageLoadState =
   | { phase: "ready"; url: string }
   | { phase: "error" };
 
-/** 取附件字节并生成 objectURL（命中缓存则直接复用）。 */
+/** 取附件字节并生成 objectURL（命中缓存则直接复用；缓存由 lib/attachment-cache 管理）。 */
 async function loadObjectUrl(att: AttachmentMeta): Promise<string> {
-  const cached = objectUrlCache.get(att.cid);
+  const cached = getCachedObjectUrl(att.cid);
   if (cached !== undefined) return cached;
   const data = await fetchAttachment({
     cid: att.cid,
@@ -36,7 +34,7 @@ async function loadObjectUrl(att: AttachmentMeta): Promise<string> {
     nonce: att.nonce,
   });
   const url = URL.createObjectURL(toBlob(data, att.mime));
-  objectUrlCache.set(att.cid, url);
+  cacheObjectUrl(att.cid, url);
   return url;
 }
 
