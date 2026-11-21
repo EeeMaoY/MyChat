@@ -1,0 +1,21 @@
+{
+  "name": "@mychat/min-demo",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "MyChat 课程演示最小实现：三栏（Alice | 节点视角 | Bob）直观展示端到端加密与零信任节点",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 5190",
+    "build": "tsc -p tsconfig.json && vite build",
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@mychat/core": "*"
+  },
+  "devDependencies": {
+    "typescript": "^5.9.3",
+    "vite": "^6.4.6",
+    "vitest": "^5.1.0"
+  }
+}
